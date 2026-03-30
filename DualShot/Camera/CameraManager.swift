@@ -5,14 +5,16 @@ import Combine
 
 // MARK: - Recording Mode
 enum RecordingMode: CaseIterable {
-    case dual       // Portrait + Landscape simultaneously
+    case dualLens   // Two orientations, max FOV each (like rotating phone)
+    case singleLens // Portrait full + Landscape cropped
     case wideOnly   // Single wide camera
     case ultraWide  // Single ultra-wide camera
     case front      // Front camera
     
     var displayName: String {
         switch self {
-        case .dual: return "Dual Output"
+        case .dualLens: return "Dual Lens"
+        case .singleLens: return "Single Lens"
         case .wideOnly: return "Wide"
         case .ultraWide: return "Ultra Wide"
         case .front: return "Front"
@@ -21,7 +23,8 @@ enum RecordingMode: CaseIterable {
     
     var shortName: String {
         switch self {
-        case .dual: return "DUAL"
+        case .dualLens: return "DUAL"
+        case .singleLens: return "SINGLE"
         case .wideOnly: return "WIDE"
         case .ultraWide: return "0.5x"
         case .front: return "FRONT"
@@ -30,7 +33,8 @@ enum RecordingMode: CaseIterable {
     
     var iconName: String {
         switch self {
-        case .dual: return "rectangle.portrait.and.arrow.right"
+        case .dualLens: return "rectangle.portrait.and.arrow.right"
+        case .singleLens: return "rectangle.center.inset.filled"
         case .wideOnly: return "camera"
         case .ultraWide: return "camera.aperture"
         case .front: return "camera.rotate"
@@ -110,7 +114,7 @@ class CameraManager: NSObject, ObservableObject {
     @Published var isRecording = false
     @Published var recordingDuration: TimeInterval = 0
     @Published var isTorchOn = false
-    @Published var recordingMode: RecordingMode = .dual
+    @Published var recordingMode: RecordingMode = .dualLens
     @Published var selectedResolution: VideoResolution = .hd1080p
     @Published var selectedFrameRate: FrameRate = .fps30
     @Published var selectedFileFormat: VideoFileFormat = .mov
@@ -146,9 +150,11 @@ class CameraManager: NSObject, ObservableObject {
     
     private nonisolated(unsafe) var isWritingStarted = false
     private nonisolated(unsafe) var sessionStartTime: CMTime?
+    private nonisolated(unsafe) var isDualLensMode = false  // true = crop both ways, false = single lens (portrait full)
     
     // For cropping
     private nonisolated(unsafe) var ciContext: CIContext?
+    private nonisolated(unsafe) var portraitPixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     
     // For single mode: movie file output
     private var movieFileOutput: AVCaptureMovieFileOutput?
@@ -230,14 +236,91 @@ class CameraManager: NSObject, ObservableObject {
     
     // MARK: Session Setup
     private func setupSession() {
-        if recordingMode == .dual {
-            setupDualOutputSession()
-        } else {
+        switch recordingMode {
+        case .dualLens:
+            setupDualLensSession()
+        case .singleLens:
+            setupSingleLensSession()
+        default:
             setupSingleCamSession()
         }
     }
     
-    private func setupDualOutputSession() {
+    // MARK: Dual Lens Mode - Capture 4:3, crop both ways for max FOV
+    private func setupDualLensSession() {
+        guard let wideCamera = wideCamera else {
+            print("Wide camera not available")
+            errorMessage = "Wide camera not available"
+            isDualModeActive = false
+            recordingMode = .wideOnly
+            setupSingleCamSession()
+            return
+        }
+        
+        print("Setting up DUAL LENS session (4:3 capture, crop both ways)")
+        
+        let session = AVCaptureSession()
+        session.beginConfiguration()
+        // Use photo preset for 4:3 aspect ratio (more sensor area)
+        session.sessionPreset = .photo
+        
+        do {
+            let videoInput = try AVCaptureDeviceInput(device: wideCamera)
+            if session.canAddInput(videoInput) {
+                session.addInput(videoInput)
+                print("✅ Wide camera input added (4:3 mode)")
+            }
+            
+            if let audioDevice = AVCaptureDevice.default(for: .audio),
+               let audioInput = try? AVCaptureDeviceInput(device: audioDevice) {
+                if session.canAddInput(audioInput) {
+                    session.addInput(audioInput)
+                }
+            }
+            
+            let videoOutput = AVCaptureVideoDataOutput()
+            videoOutput.setSampleBufferDelegate(self, queue: videoWritingQueue)
+            videoOutput.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
+            if session.canAddOutput(videoOutput) {
+                session.addOutput(videoOutput)
+                videoDataOutput = videoOutput
+                // Don't set orientation - we'll handle both orientations in processing
+                print("✅ Video data output added")
+            }
+            
+            let audioOutput = AVCaptureAudioDataOutput()
+            audioOutput.setSampleBufferDelegate(self, queue: audioWritingQueue)
+            if session.canAddOutput(audioOutput) {
+                session.addOutput(audioOutput)
+                audioDataOutput = audioOutput
+            }
+            
+        } catch {
+            errorMessage = "Failed to setup camera: \(error.localizedDescription)"
+            session.commitConfiguration()
+            return
+        }
+        
+        session.commitConfiguration()
+        captureSession = session
+        isDualModeActive = true
+        
+        print("Dual Lens session configured")
+        
+        let sessionToStart = session
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            sessionToStart.startRunning()
+            print("Session running: \(sessionToStart.isRunning)")
+            DispatchQueue.main.async {
+                self?.isSessionRunning = sessionToStart.isRunning
+            }
+        }
+    }
+    
+    // MARK: Single Lens Mode - Portrait full, landscape cropped
+    private func setupSingleLensSession() {
         guard let wideCamera = wideCamera else {
             print("Wide camera not available")
             errorMessage = "Wide camera not available"
@@ -339,7 +422,7 @@ class CameraManager: NSObject, ObservableObject {
         
         let camera: AVCaptureDevice?
         switch recordingMode {
-        case .dual, .wideOnly:
+        case .dualLens, .singleLens, .wideOnly:
             camera = wideCamera
         case .ultraWide:
             camera = ultraWideCamera
@@ -406,7 +489,7 @@ class CameraManager: NSObject, ObservableObject {
         let tempDir = FileManager.default.temporaryDirectory
         let timestamp = Int(Date().timeIntervalSince1970)
         
-        if recordingMode == .dual && isDualModeActive {
+        if (recordingMode == .dualLens || recordingMode == .singleLens) && isDualModeActive {
             startDualRecording(tempDir: tempDir, timestamp: timestamp)
         } else {
             startSingleRecording(tempDir: tempDir, timestamp: timestamp)
@@ -421,21 +504,21 @@ class CameraManager: NSObject, ObservableObject {
         portraitVideoURL = tempDir.appendingPathComponent("portrait_\(timestamp).\(selectedFileFormat.fileExtension)")
         landscapeVideoURL = tempDir.appendingPathComponent("landscape_\(timestamp).\(selectedFileFormat.fileExtension)")
         
-        print("Starting dual recording...")
+        isDualLensMode = (recordingMode == .dualLens)
+        
+        print("Starting \(isDualLensMode ? "DUAL LENS" : "SINGLE LENS") recording...")
         print("Portrait: \(portraitVideoURL!.lastPathComponent)")
         print("Landscape: \(landscapeVideoURL!.lastPathComponent)")
         
         // Setup asset writers
         do {
-            // Capturing in PORTRAIT orientation, so frames are 9:16 (e.g., 1080x1920)
-            // Landscape will be a CENTER CROP of portrait to get 16:9
             let audioSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVSampleRateKey: 44100,
                 AVNumberOfChannelsKey: 2
             ]
             
-            // PORTRAIT writer - full frame, no crop
+            // PORTRAIT writer
             portraitAssetWriter = try AVAssetWriter(url: portraitVideoURL!, fileType: selectedFileFormat.fileType)
             
             let portraitVideoSettings: [String: Any] = [
@@ -449,6 +532,19 @@ class CameraManager: NSObject, ObservableObject {
             portraitAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             portraitAudioInput?.expectsMediaDataInRealTime = true
             
+            // For Dual Lens mode, portrait also needs pixel buffer adaptor for cropping
+            if isDualLensMode {
+                let portraitPixelBufferAttributes: [String: Any] = [
+                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                    kCVPixelBufferWidthKey as String: selectedResolution.portraitSize.width,
+                    kCVPixelBufferHeightKey as String: selectedResolution.portraitSize.height
+                ]
+                portraitPixelBufferAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+                    assetWriterInput: portraitVideoInput!,
+                    sourcePixelBufferAttributes: portraitPixelBufferAttributes
+                )
+            }
+            
             if let writer = portraitAssetWriter {
                 if let videoInput = portraitVideoInput, writer.canAdd(videoInput) {
                     writer.add(videoInput)
@@ -457,7 +553,7 @@ class CameraManager: NSObject, ObservableObject {
                     writer.add(audioInput)
                 }
             }
-            print("✅ Portrait writer configured (full frame)")
+            print("✅ Portrait writer configured \(isDualLensMode ? "(will receive cropped frames)" : "(full frame)")")
             
             // LANDSCAPE writer - center crop of portrait to 16:9
             // For 1080x1920 portrait, landscape crop is 1080x608 (center strip)
@@ -621,6 +717,7 @@ class CameraManager: NSObject, ObservableObject {
         portraitAssetWriter = nil
         portraitVideoInput = nil
         portraitAudioInput = nil
+        portraitPixelBufferAdaptor = nil
         landscapeAssetWriter = nil
         landscapeVideoInput = nil
         landscapeAudioInput = nil
@@ -629,6 +726,7 @@ class CameraManager: NSObject, ObservableObject {
         landscapeVideoURL = nil
         isWritingStarted = false
         sessionStartTime = nil
+        isDualLensMode = false
         ciContext = nil
         writerLock.unlock()
     }
@@ -744,15 +842,16 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
         
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         
-        let frameWidth = CVPixelBufferGetWidth(imageBuffer)
-        let frameHeight = CVPixelBufferGetHeight(imageBuffer)
+        let frameWidth = CGFloat(CVPixelBufferGetWidth(imageBuffer))
+        let frameHeight = CGFloat(CVPixelBufferGetHeight(imageBuffer))
         
         // Start writers on first frame
         if !isWritingStarted {
             isWritingStarted = true
             sessionStartTime = timestamp
             
-            print("📐 Actual frame dimensions: \(frameWidth) x \(frameHeight)")
+            print("📐 Actual frame dimensions: \(Int(frameWidth)) x \(Int(frameHeight))")
+            print("📐 Mode: \(isDualLensMode ? "DUAL LENS" : "SINGLE LENS")")
             
             portraitAssetWriter?.startWriting()
             portraitAssetWriter?.startSession(atSourceTime: timestamp)
@@ -763,42 +862,95 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
             print("✅ Started writing at \(timestamp.seconds)")
         }
         
-        // Write full frame to portrait
-        if let input = portraitVideoInput, input.isReadyForMoreMediaData {
-            input.append(sampleBuffer)
-        }
+        guard let context = ciContext else { return }
+        let ciImage = CIImage(cvPixelBuffer: imageBuffer)
         
-        // Crop center for landscape and write
-        if let input = landscapeVideoInput, input.isReadyForMoreMediaData,
-           let adaptor = landscapePixelBufferAdaptor,
-           let context = ciContext {
+        if isDualLensMode {
+            // DUAL LENS: Crop 4:3 both ways for max FOV
+            // Frame is 4:3 (e.g., 4032x3024 or similar)
             
-            // Calculate crop rect for 16:9 from portrait (9:16)
-            // Portrait is 1080x1920, we need center strip that's 16:9
-            // Height of crop = width * 9/16 = 1080 * 9/16 = 607.5 ≈ 608
-            let cropHeight = CGFloat(frameWidth) * 9.0 / 16.0
-            let cropY = (CGFloat(frameHeight) - cropHeight) / 2.0
+            // PORTRAIT (9:16): Crop center vertical strip
+            // Width needed = height * 9/16
+            let portraitCropWidth = frameHeight * 9.0 / 16.0
+            let portraitCropX = (frameWidth - portraitCropWidth) / 2.0
+            let portraitCropRect = CGRect(x: portraitCropX, y: 0, width: portraitCropWidth, height: frameHeight)
             
-            // Create CIImage and crop
-            let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-            let cropRect = CGRect(x: 0, y: cropY, width: CGFloat(frameWidth), height: cropHeight)
-            let croppedImage = ciImage.cropped(to: cropRect)
-            
-            // Scale to landscape dimensions (1920x1080)
-            let scaleX = CGFloat(1920) / CGFloat(frameWidth)
-            let scaleY = CGFloat(1080) / cropHeight
-            let scaledImage = croppedImage
-                .transformed(by: CGAffineTransform(translationX: 0, y: -cropY))
-                .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
-            
-            // Get pixel buffer from pool
-            if let pixelBufferPool = adaptor.pixelBufferPool {
-                var newPixelBuffer: CVPixelBuffer?
-                CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool, &newPixelBuffer)
+            if let input = portraitVideoInput, input.isReadyForMoreMediaData,
+               let adaptor = portraitPixelBufferAdaptor {
+                let croppedImage = ciImage.cropped(to: portraitCropRect)
+                    .transformed(by: CGAffineTransform(translationX: -portraitCropX, y: 0))
                 
-                if let outputBuffer = newPixelBuffer {
-                    context.render(scaledImage, to: outputBuffer)
-                    adaptor.append(outputBuffer, withPresentationTime: timestamp)
+                // Scale to 1080x1920
+                let scaleX = 1080.0 / portraitCropWidth
+                let scaleY = 1920.0 / frameHeight
+                let scaledImage = croppedImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+                
+                if let pixelBufferPool = adaptor.pixelBufferPool {
+                    var newPixelBuffer: CVPixelBuffer?
+                    CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool, &newPixelBuffer)
+                    if let outputBuffer = newPixelBuffer {
+                        context.render(scaledImage, to: outputBuffer)
+                        adaptor.append(outputBuffer, withPresentationTime: timestamp)
+                    }
+                }
+            }
+            
+            // LANDSCAPE (16:9): Crop center horizontal strip
+            // Height needed = width * 9/16
+            let landscapeCropHeight = frameWidth * 9.0 / 16.0
+            let landscapeCropY = (frameHeight - landscapeCropHeight) / 2.0
+            let landscapeCropRect = CGRect(x: 0, y: landscapeCropY, width: frameWidth, height: landscapeCropHeight)
+            
+            if let input = landscapeVideoInput, input.isReadyForMoreMediaData,
+               let adaptor = landscapePixelBufferAdaptor {
+                let croppedImage = ciImage.cropped(to: landscapeCropRect)
+                    .transformed(by: CGAffineTransform(translationX: 0, y: -landscapeCropY))
+                
+                // Scale to 1920x1080
+                let scaleX = 1920.0 / frameWidth
+                let scaleY = 1080.0 / landscapeCropHeight
+                let scaledImage = croppedImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+                
+                if let pixelBufferPool = adaptor.pixelBufferPool {
+                    var newPixelBuffer: CVPixelBuffer?
+                    CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool, &newPixelBuffer)
+                    if let outputBuffer = newPixelBuffer {
+                        context.render(scaledImage, to: outputBuffer)
+                        adaptor.append(outputBuffer, withPresentationTime: timestamp)
+                    }
+                }
+            }
+            
+        } else {
+            // SINGLE LENS: Portrait full frame, landscape cropped
+            // Frame is portrait (9:16, e.g., 1080x1920)
+            
+            // Write full frame to portrait
+            if let input = portraitVideoInput, input.isReadyForMoreMediaData {
+                input.append(sampleBuffer)
+            }
+            
+            // Crop center for landscape (16:9 from portrait 9:16)
+            let cropHeight = frameWidth * 9.0 / 16.0
+            let cropY = (frameHeight - cropHeight) / 2.0
+            let cropRect = CGRect(x: 0, y: cropY, width: frameWidth, height: cropHeight)
+            
+            if let input = landscapeVideoInput, input.isReadyForMoreMediaData,
+               let adaptor = landscapePixelBufferAdaptor {
+                let croppedImage = ciImage.cropped(to: cropRect)
+                    .transformed(by: CGAffineTransform(translationX: 0, y: -cropY))
+                
+                let scaleX = 1920.0 / frameWidth
+                let scaleY = 1080.0 / cropHeight
+                let scaledImage = croppedImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+                
+                if let pixelBufferPool = adaptor.pixelBufferPool {
+                    var newPixelBuffer: CVPixelBuffer?
+                    CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool, &newPixelBuffer)
+                    if let outputBuffer = newPixelBuffer {
+                        context.render(scaledImage, to: outputBuffer)
+                        adaptor.append(outputBuffer, withPresentationTime: timestamp)
+                    }
                 }
             }
         }
