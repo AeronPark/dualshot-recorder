@@ -139,11 +139,19 @@ class PreviewUIView: UIView {
                 landscapeLayer.frame = container.bounds
                 landscapeLayer.videoGravity = .resizeAspectFill
                 landscapeLayer.cornerRadius = pipCornerRadius
+                
+                // Ensure landscape orientation is set
+                if let connection = landscapeLayer.connection {
+                    connection.videoOrientation = .landscapeRight
+                }
+                
                 container.layer.insertSublayer(landscapeLayer, at: 0)
                 pipPreviewLayer = landscapeLayer
                 
-                print("PiP preview layer connected")
+                print("PiP preview layer connected with landscape orientation")
             }
+        } else {
+            print("⚠️ No landscape preview layer available from camera manager")
         }
     }
     

@@ -306,9 +306,14 @@ class CameraManager: NSObject, ObservableObject {
         // Create landscape preview layer (shows 16:9 framing for landscape output)
         let landscapePreview = AVCaptureVideoPreviewLayer(session: session)
         landscapePreview.videoGravity = .resizeAspectFill
-        landscapePreview.connection?.videoOrientation = .landscapeRight
+        // Set landscape orientation for PiP preview
+        if let connection = landscapePreview.connection {
+            connection.videoOrientation = .landscapeRight
+            print("✅ Landscape PiP preview created with landscapeRight orientation")
+        } else {
+            print("⚠️ Landscape preview has no connection yet")
+        }
         self.landscapePreviewLayer = landscapePreview
-        print("✅ Landscape PiP preview created")
         
         print("Dual output session configured")
         
