@@ -5,14 +5,14 @@ import Combine
 
 // MARK: - Recording Mode
 enum RecordingMode: CaseIterable {
-    case dual       // Both cameras simultaneously
+    case dual       // Portrait + Landscape simultaneously
     case wideOnly   // Single wide camera
     case ultraWide  // Single ultra-wide camera
     case front      // Front camera
     
     var displayName: String {
         switch self {
-        case .dual: return "Dual Camera"
+        case .dual: return "Dual Output"
         case .wideOnly: return "Wide"
         case .ultraWide: return "Ultra Wide"
         case .front: return "Front"
@@ -30,7 +30,7 @@ enum RecordingMode: CaseIterable {
     
     var iconName: String {
         switch self {
-        case .dual: return "camera.on.rectangle"
+        case .dual: return "rectangle.portrait.and.arrow.right"
         case .wideOnly: return "camera"
         case .ultraWide: return "camera.aperture"
         case .front: return "camera.rotate"
@@ -116,25 +116,44 @@ class CameraManager: NSObject, ObservableObject {
     @Published var selectedFileFormat: VideoFileFormat = .mov
     @Published var permissionGranted = false
     @Published var errorMessage: String?
+    @Published var isSessionRunning = false
+    @Published var isDualModeActive = false
     
     // MARK: Private Properties
-    private var multiCamSession: AVCaptureMultiCamSession?
-    private var singleCamSession: AVCaptureSession?
+    private var captureSession: AVCaptureSession?
     
     private var wideCamera: AVCaptureDevice?
     private var ultraWideCamera: AVCaptureDevice?
     private var frontCamera: AVCaptureDevice?
     
-    private var portraitMovieOutput: AVCaptureMovieFileOutput?
-    private var landscapeMovieOutput: AVCaptureMovieFileOutput?
-    private var singleMovieOutput: AVCaptureMovieFileOutput?
+    // For dual mode: video data output + asset writers
+    private var videoDataOutput: AVCaptureVideoDataOutput?
+    private var audioDataOutput: AVCaptureAudioDataOutput?
+    
+    private var portraitAssetWriter: AVAssetWriter?
+    private var portraitVideoInput: AVAssetWriterInput?
+    private var portraitAudioInput: AVAssetWriterInput?
+    
+    private var landscapeAssetWriter: AVAssetWriter?
+    private var landscapeVideoInput: AVAssetWriterInput?
+    private var landscapeAudioInput: AVAssetWriterInput?
     
     private var portraitVideoURL: URL?
     private var landscapeVideoURL: URL?
+    
+    private var isWritingStarted = false
+    private var sessionStartTime: CMTime?
+    
+    // For single mode: movie file output
+    private var movieFileOutput: AVCaptureMovieFileOutput?
     private var singleVideoURL: URL?
     
     private var recordingTimer: Timer?
     private var recordingStartTime: Date?
+    
+    // Processing queues
+    private let videoWritingQueue = DispatchQueue(label: "com.dualshot.videoWriting")
+    private let audioWritingQueue = DispatchQueue(label: "com.dualshot.audioWriting")
     
     // MARK: Computed Properties
     var availableStorageString: String {
@@ -147,12 +166,9 @@ class CameraManager: NSObject, ObservableObject {
         return AVCaptureMultiCamSession.isMultiCamSupported
     }
     
-    // MARK: Preview Layers
+    // MARK: Preview Layer
     var previewLayer: AVCaptureVideoPreviewLayer?
     var landscapePreviewLayer: AVCaptureVideoPreviewLayer?
-    
-    // Store wide camera connection for PiP preview
-    private var wideVideoDataOutput: AVCaptureVideoDataOutput?
     
     // MARK: Initialization
     override init() {
@@ -180,10 +196,7 @@ class CameraManager: NSObject, ObservableObject {
             errorMessage = "Camera access denied. Please enable in Settings."
         }
         
-        // Also request microphone access
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
-        
-        // Request photo library access for saving
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { _ in }
     }
     
@@ -211,23 +224,14 @@ class CameraManager: NSObject, ObservableObject {
     
     // MARK: Session Setup
     private func setupSession() {
-        if recordingMode == .dual && isMultiCamSupported {
-            setupMultiCamSession()
+        if recordingMode == .dual {
+            setupDualOutputSession()
         } else {
             setupSingleCamSession()
         }
     }
     
-    private func setupMultiCamSession() {
-        guard isMultiCamSupported else {
-            print("Multi-cam not supported on this device")
-            errorMessage = "Multi-cam not supported on this device"
-            isDualModeActive = false
-            recordingMode = .wideOnly
-            setupSingleCamSession()
-            return
-        }
-        
+    private func setupDualOutputSession() {
         guard let wideCamera = wideCamera else {
             print("Wide camera not available")
             errorMessage = "Wide camera not available"
@@ -237,129 +241,71 @@ class CameraManager: NSObject, ObservableObject {
             return
         }
         
-        print("Setting up dual output session (portrait + landscape from same camera)")
-        print("📷 Wide camera: \(wideCamera.localizedName) - \(wideCamera.uniqueID)")
+        print("Setting up dual output session (portrait + landscape)")
+        print("📷 Wide camera: \(wideCamera.localizedName)")
         
-        let session = AVCaptureMultiCamSession()
-        
+        let session = AVCaptureSession()
         session.beginConfiguration()
+        session.sessionPreset = selectedResolution == .uhd4k ? .hd4K3840x2160 : .hd1920x1080
         
         do {
-            // Wide camera input - used for BOTH portrait and landscape outputs
-            // (same camera, different orientation transforms)
-            let wideInput = try AVCaptureDeviceInput(device: wideCamera)
-            if session.canAddInput(wideInput) {
-                session.addInputWithNoConnections(wideInput)
-                print("✅ Wide camera input added (used for both outputs)")
-            } else {
-                print("❌ Cannot add wide camera input")
+            // Camera input
+            let videoInput = try AVCaptureDeviceInput(device: wideCamera)
+            if session.canAddInput(videoInput) {
+                session.addInput(videoInput)
+                print("✅ Wide camera input added")
             }
             
             // Audio input
-            var audioInput: AVCaptureDeviceInput?
-            if let audioDevice = AVCaptureDevice.default(for: .audio) {
-                audioInput = try? AVCaptureDeviceInput(device: audioDevice)
-                if let audioInput = audioInput, session.canAddInput(audioInput) {
-                    session.addInputWithNoConnections(audioInput)
+            if let audioDevice = AVCaptureDevice.default(for: .audio),
+               let audioInput = try? AVCaptureDeviceInput(device: audioDevice) {
+                if session.canAddInput(audioInput) {
+                    session.addInput(audioInput)
                     print("✅ Audio input added")
                 }
             }
             
-            // Both outputs use the WIDE camera, just different orientations
-            // Portrait: 9:16 (rotated 90°)
-            // Landscape: 16:9 (native sensor orientation)
-            
-            let widePorts = wideInput.ports(for: .video, sourceDeviceType: .builtInWideAngleCamera, sourceDevicePosition: .back)
-            print("📷 Wide ports found: \(widePorts.count)")
-            
-            guard let widePort = widePorts.first else {
-                print("❌ No wide port found!")
-                throw NSError(domain: "CameraManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Wide camera port not found"])
+            // Video data output (for capturing frames)
+            let videoOutput = AVCaptureVideoDataOutput()
+            videoOutput.setSampleBufferDelegate(self, queue: videoWritingQueue)
+            videoOutput.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
+            if session.canAddOutput(videoOutput) {
+                session.addOutput(videoOutput)
+                videoDataOutput = videoOutput
+                
+                // Set landscape orientation for capture
+                if let connection = videoOutput.connection(with: .video) {
+                    connection.videoOrientation = .landscapeRight
+                }
+                print("✅ Video data output added")
             }
             
-            // Portrait output (9:16 - rotated for vertical viewing)
-            let portraitOutput = AVCaptureMovieFileOutput()
-            if session.canAddOutput(portraitOutput) {
-                session.addOutputWithNoConnections(portraitOutput)
-                
-                let portraitConnection = AVCaptureConnection(inputPorts: [widePort], output: portraitOutput)
-                portraitConnection.videoOrientation = .portrait
-                if session.canAddConnection(portraitConnection) {
-                    session.addConnection(portraitConnection)
-                    print("✅ Portrait video connection added (wide camera, portrait orientation)")
-                } else {
-                    print("❌ Cannot add portrait video connection")
-                }
-                
-                // Connect audio to portrait output
-                if let audioInput = audioInput,
-                   let audioPort = audioInput.ports(for: .audio, sourceDeviceType: nil, sourceDevicePosition: .unspecified).first {
-                    let audioConnection = AVCaptureConnection(inputPorts: [audioPort], output: portraitOutput)
-                    if session.canAddConnection(audioConnection) {
-                        session.addConnection(audioConnection)
-                        print("✅ Portrait audio connection added")
-                    }
-                }
-            }
-            portraitMovieOutput = portraitOutput
-            
-            // Landscape output (16:9 - native horizontal viewing)
-            let landscapeOutput = AVCaptureMovieFileOutput()
-            if session.canAddOutput(landscapeOutput) {
-                session.addOutputWithNoConnections(landscapeOutput)
-                
-                let landscapeConnection = AVCaptureConnection(inputPorts: [widePort], output: landscapeOutput)
-                landscapeConnection.videoOrientation = .landscapeRight
-                if session.canAddConnection(landscapeConnection) {
-                    session.addConnection(landscapeConnection)
-                    print("✅ Landscape video connection added (wide camera, landscape orientation)")
-                } else {
-                    print("❌ Cannot add landscape video connection")
-                }
-                
-                // Connect audio to landscape output
-                if let audioInput = audioInput,
-                   let audioPort = audioInput.ports(for: .audio, sourceDeviceType: nil, sourceDevicePosition: .unspecified).first {
-                    let audioConnection = AVCaptureConnection(inputPorts: [audioPort], output: landscapeOutput)
-                    if session.canAddConnection(audioConnection) {
-                        session.addConnection(audioConnection)
-                        print("✅ Landscape audio connection added")
-                    }
-                }
-            }
-            landscapeMovieOutput = landscapeOutput
-            
-            // Create landscape preview layer (PiP showing 16:9 framing)
-            let landscapePreview = AVCaptureVideoPreviewLayer(sessionWithNoConnection: session)
-            landscapePreview.videoGravity = .resizeAspectFill
-            
-            // Connect wide camera to landscape preview
-            let previewConnection = AVCaptureConnection(inputPort: widePort, videoPreviewLayer: landscapePreview)
-            previewConnection.videoOrientation = .landscapeRight
-            if session.canAddConnection(previewConnection) {
-                session.addConnection(previewConnection)
-                self.landscapePreviewLayer = landscapePreview
-                print("✅ Landscape PiP preview layer created")
-            } else {
-                print("❌ Cannot add landscape preview connection")
+            // Audio data output
+            let audioOutput = AVCaptureAudioDataOutput()
+            audioOutput.setSampleBufferDelegate(self, queue: audioWritingQueue)
+            if session.canAddOutput(audioOutput) {
+                session.addOutput(audioOutput)
+                audioDataOutput = audioOutput
+                print("✅ Audio data output added")
             }
             
         } catch {
-            errorMessage = "Failed to setup multi-cam: \(error.localizedDescription)"
+            errorMessage = "Failed to setup camera: \(error.localizedDescription)"
             session.commitConfiguration()
             return
         }
         
         session.commitConfiguration()
-        multiCamSession = session
+        captureSession = session
         isDualModeActive = true
         
-        print("Multi-cam session configured with dual outputs")
+        print("Dual output session configured")
         
-        // Start session on background thread
         Task.detached { [weak self, weak session] in
             session?.startRunning()
-            print("Multi-cam session running: \(session?.isRunning ?? false)")
+            print("Session running: \(session?.isRunning ?? false)")
             await MainActor.run {
                 self?.isSessionRunning = session?.isRunning ?? false
             }
@@ -393,7 +339,6 @@ class CameraManager: NSObject, ObservableObject {
                 session.addInput(input)
             }
             
-            // Audio input
             if let audioDevice = AVCaptureDevice.default(for: .audio),
                let audioInput = try? AVCaptureDeviceInput(device: audioDevice) {
                 if session.canAddInput(audioInput) {
@@ -405,19 +350,18 @@ class CameraManager: NSObject, ObservableObject {
             if session.canAddOutput(movieOutput) {
                 session.addOutput(movieOutput)
             }
-            singleMovieOutput = movieOutput
+            movieFileOutput = movieOutput
             
         } catch {
             errorMessage = "Failed to setup camera: \(error.localizedDescription)"
         }
         
         session.commitConfiguration()
-        singleCamSession = session
+        captureSession = session
+        isDualModeActive = false
         
-        print("Single cam session configured, starting...")
         Task.detached { [weak self, weak session] in
             session?.startRunning()
-            print("Single cam session running: \(session?.isRunning ?? false)")
             await MainActor.run {
                 self?.isSessionRunning = session?.isRunning ?? false
             }
@@ -437,39 +381,10 @@ class CameraManager: NSObject, ObservableObject {
         let tempDir = FileManager.default.temporaryDirectory
         let timestamp = Int(Date().timeIntervalSince1970)
         
-        if recordingMode == .dual && multiCamSession != nil && isDualModeActive {
-            // Dual recording
-            portraitVideoURL = tempDir.appendingPathComponent("portrait_\(timestamp).\(selectedFileFormat.fileExtension)")
-            landscapeVideoURL = tempDir.appendingPathComponent("landscape_\(timestamp).\(selectedFileFormat.fileExtension)")
-            
-            print("Starting dual recording...")
-            print("Portrait output: \(portraitMovieOutput != nil), URL: \(portraitVideoURL!)")
-            print("Landscape output: \(landscapeMovieOutput != nil), URL: \(landscapeVideoURL!)")
-            
-            if let portraitOutput = portraitMovieOutput {
-                portraitOutput.startRecording(to: portraitVideoURL!, recordingDelegate: self)
-                print("Portrait recording started")
-            } else {
-                print("ERROR: Portrait movie output is nil!")
-            }
-            
-            if let landscapeOutput = landscapeMovieOutput {
-                landscapeOutput.startRecording(to: landscapeVideoURL!, recordingDelegate: self)
-                print("Landscape recording started")
-            } else {
-                print("ERROR: Landscape movie output is nil!")
-            }
+        if recordingMode == .dual && isDualModeActive {
+            startDualRecording(tempDir: tempDir, timestamp: timestamp)
         } else {
-            // Single camera recording
-            singleVideoURL = tempDir.appendingPathComponent("video_\(timestamp).\(selectedFileFormat.fileExtension)")
-            print("Starting single camera recording to: \(singleVideoURL!)")
-            
-            if let output = singleMovieOutput {
-                output.startRecording(to: singleVideoURL!, recordingDelegate: self)
-                print("Single recording started")
-            } else {
-                print("ERROR: Single movie output is nil!")
-            }
+            startSingleRecording(tempDir: tempDir, timestamp: timestamp)
         }
         
         isRecording = true
@@ -477,24 +392,195 @@ class CameraManager: NSObject, ObservableObject {
         startRecordingTimer()
     }
     
+    private func startDualRecording(tempDir: URL, timestamp: Int) {
+        portraitVideoURL = tempDir.appendingPathComponent("portrait_\(timestamp).\(selectedFileFormat.fileExtension)")
+        landscapeVideoURL = tempDir.appendingPathComponent("landscape_\(timestamp).\(selectedFileFormat.fileExtension)")
+        
+        print("Starting dual recording...")
+        print("Portrait: \(portraitVideoURL!.lastPathComponent)")
+        print("Landscape: \(landscapeVideoURL!.lastPathComponent)")
+        
+        // Setup asset writers
+        do {
+            // Portrait writer (9:16)
+            portraitAssetWriter = try AVAssetWriter(url: portraitVideoURL!, fileType: selectedFileFormat.fileType)
+            
+            let portraitVideoSettings: [String: Any] = [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: selectedResolution.portraitSize.width,
+                AVVideoHeightKey: selectedResolution.portraitSize.height
+            ]
+            portraitVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: portraitVideoSettings)
+            portraitVideoInput?.expectsMediaDataInRealTime = true
+            // Rotate 90° for portrait
+            portraitVideoInput?.transform = CGAffineTransform(rotationAngle: .pi / 2)
+            
+            let portraitAudioSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 44100,
+                AVNumberOfChannelsKey: 2
+            ]
+            portraitAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: portraitAudioSettings)
+            portraitAudioInput?.expectsMediaDataInRealTime = true
+            
+            if let writer = portraitAssetWriter {
+                if let videoInput = portraitVideoInput, writer.canAdd(videoInput) {
+                    writer.add(videoInput)
+                }
+                if let audioInput = portraitAudioInput, writer.canAdd(audioInput) {
+                    writer.add(audioInput)
+                }
+            }
+            
+            // Landscape writer (16:9)
+            landscapeAssetWriter = try AVAssetWriter(url: landscapeVideoURL!, fileType: selectedFileFormat.fileType)
+            
+            let landscapeVideoSettings: [String: Any] = [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: selectedResolution.landscapeSize.width,
+                AVVideoHeightKey: selectedResolution.landscapeSize.height
+            ]
+            landscapeVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: landscapeVideoSettings)
+            landscapeVideoInput?.expectsMediaDataInRealTime = true
+            // No rotation for landscape
+            
+            let landscapeAudioSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 44100,
+                AVNumberOfChannelsKey: 2
+            ]
+            landscapeAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: landscapeAudioSettings)
+            landscapeAudioInput?.expectsMediaDataInRealTime = true
+            
+            if let writer = landscapeAssetWriter {
+                if let videoInput = landscapeVideoInput, writer.canAdd(videoInput) {
+                    writer.add(videoInput)
+                }
+                if let audioInput = landscapeAudioInput, writer.canAdd(audioInput) {
+                    writer.add(audioInput)
+                }
+            }
+            
+            isWritingStarted = false
+            sessionStartTime = nil
+            
+            print("✅ Asset writers configured")
+            
+        } catch {
+            print("❌ Failed to create asset writers: \(error)")
+            errorMessage = "Failed to start recording: \(error.localizedDescription)"
+        }
+    }
+    
+    private func startSingleRecording(tempDir: URL, timestamp: Int) {
+        singleVideoURL = tempDir.appendingPathComponent("video_\(timestamp).\(selectedFileFormat.fileExtension)")
+        
+        if let output = movieFileOutput, let url = singleVideoURL {
+            output.startRecording(to: url, recordingDelegate: self)
+        }
+    }
+    
     private func stopRecording() {
         print("Stopping recording...")
         
-        if let portrait = portraitMovieOutput, portrait.isRecording {
-            print("Stopping portrait recording")
-            portrait.stopRecording()
-        }
-        if let landscape = landscapeMovieOutput, landscape.isRecording {
-            print("Stopping landscape recording")
-            landscape.stopRecording()
-        }
-        if let single = singleMovieOutput, single.isRecording {
-            print("Stopping single recording")
-            single.stopRecording()
+        if recordingMode == .dual && isDualModeActive {
+            stopDualRecording()
+        } else {
+            if let output = movieFileOutput, output.isRecording {
+                output.stopRecording()
+            }
         }
         
         isRecording = false
         stopRecordingTimer()
+    }
+    
+    private func stopDualRecording() {
+        videoWritingQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            self.portraitVideoInput?.markAsFinished()
+            self.portraitAudioInput?.markAsFinished()
+            self.landscapeVideoInput?.markAsFinished()
+            self.landscapeAudioInput?.markAsFinished()
+            
+            let group = DispatchGroup()
+            
+            if let writer = self.portraitAssetWriter, writer.status == .writing {
+                group.enter()
+                writer.finishWriting {
+                    print("🎬 Portrait recording finished")
+                    group.leave()
+                }
+            }
+            
+            if let writer = self.landscapeAssetWriter, writer.status == .writing {
+                group.enter()
+                writer.finishWriting {
+                    print("🎬 Landscape recording finished")
+                    group.leave()
+                }
+            }
+            
+            group.notify(queue: .main) { [weak self] in
+                self?.saveRecordingsToPhotos()
+                self?.cleanupWriters()
+            }
+        }
+    }
+    
+    private func saveRecordingsToPhotos() {
+        if let portraitURL = portraitVideoURL {
+            saveVideoToPhotos(url: portraitURL, name: "Portrait")
+        }
+        if let landscapeURL = landscapeVideoURL {
+            saveVideoToPhotos(url: landscapeURL, name: "Landscape")
+        }
+    }
+    
+    private func saveVideoToPhotos(url: URL, name: String) {
+        // Check file exists and has content
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            print("❌ \(name) file doesn't exist")
+            return
+        }
+        
+        do {
+            let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+            let fileSize = attrs[.size] as? Int64 ?? 0
+            print("📁 \(name) file size: \(fileSize) bytes")
+            
+            if fileSize == 0 {
+                print("❌ \(name) file is empty")
+                return
+            }
+        } catch {
+            print("❌ Cannot read \(name) file attributes: \(error)")
+            return
+        }
+        
+        PHPhotoLibrary.shared().performChanges {
+            PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+        } completionHandler: { success, error in
+            if success {
+                print("✅ \(name) video saved to Photos")
+            } else if let error = error {
+                print("❌ Failed to save \(name) video: \(error.localizedDescription)")
+            }
+            
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+    
+    private func cleanupWriters() {
+        portraitAssetWriter = nil
+        portraitVideoInput = nil
+        portraitAudioInput = nil
+        landscapeAssetWriter = nil
+        landscapeVideoInput = nil
+        landscapeAudioInput = nil
+        isWritingStarted = false
+        sessionStartTime = nil
     }
     
     // MARK: Timer
@@ -530,6 +616,8 @@ class CameraManager: NSObject, ObservableObject {
     
     // MARK: Mode Cycling
     func cycleMode() {
+        guard !isRecording else { return }
+        
         let allModes = RecordingMode.allCases
         if let currentIndex = allModes.firstIndex(of: recordingMode) {
             let nextIndex = (currentIndex + 1) % allModes.count
@@ -537,17 +625,21 @@ class CameraManager: NSObject, ObservableObject {
             
             // Restart session with new mode
             stopSession()
-            setupSession()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.setupSession()
+            }
         }
     }
     
     private func stopSession() {
-        multiCamSession?.stopRunning()
-        singleCamSession?.stopRunning()
-        multiCamSession = nil
-        singleCamSession = nil
+        captureSession?.stopRunning()
+        captureSession = nil
+        videoDataOutput = nil
+        audioDataOutput = nil
+        movieFileOutput = nil
         landscapePreviewLayer = nil
         isDualModeActive = false
+        isSessionRunning = false
     }
     
     // MARK: Storage
@@ -565,16 +657,8 @@ class CameraManager: NSObject, ObservableObject {
     
     // MARK: Get Active Session
     func getActiveSession() -> AVCaptureSession? {
-        if recordingMode == .dual && multiCamSession != nil {
-            return multiCamSession
-        } else {
-            return singleCamSession
-        }
+        return captureSession
     }
-    
-    // MARK: Session Running State
-    @Published var isSessionRunning = false
-    @Published var isDualModeActive = false
     
     func startSession() {
         Task.detached { [weak self] in
@@ -583,7 +667,6 @@ class CameraManager: NSObject, ObservableObject {
             if let session = await self.getActiveSession() {
                 if !session.isRunning {
                     session.startRunning()
-                    print("Session started running")
                 }
                 await MainActor.run {
                     self.isSessionRunning = session.isRunning
@@ -593,16 +676,65 @@ class CameraManager: NSObject, ObservableObject {
     }
 }
 
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
+    nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
+        
+        let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        
+        if output is AVCaptureVideoDataOutput {
+            processVideoSampleBuffer(sampleBuffer, timestamp: timestamp)
+        } else if output is AVCaptureAudioDataOutput {
+            processAudioSampleBuffer(sampleBuffer, timestamp: timestamp)
+        }
+    }
+    
+    nonisolated private func processVideoSampleBuffer(_ sampleBuffer: CMSampleBuffer, timestamp: CMTime) {
+        // Start writers on first frame
+        if !isWritingStarted {
+            isWritingStarted = true
+            sessionStartTime = timestamp
+            
+            portraitAssetWriter?.startWriting()
+            portraitAssetWriter?.startSession(atSourceTime: timestamp)
+            
+            landscapeAssetWriter?.startWriting()
+            landscapeAssetWriter?.startSession(atSourceTime: timestamp)
+            
+            print("✅ Started writing at \(timestamp.seconds)")
+        }
+        
+        // Write to portrait
+        if let input = portraitVideoInput, input.isReadyForMoreMediaData {
+            input.append(sampleBuffer)
+        }
+        
+        // Write to landscape
+        if let input = landscapeVideoInput, input.isReadyForMoreMediaData {
+            input.append(sampleBuffer)
+        }
+    }
+    
+    nonisolated private func processAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer, timestamp: CMTime) {
+        guard isWritingStarted else { return }
+        
+        // Write to portrait
+        if let input = portraitAudioInput, input.isReadyForMoreMediaData {
+            input.append(sampleBuffer)
+        }
+        
+        // Write to landscape
+        if let input = landscapeAudioInput, input.isReadyForMoreMediaData {
+            input.append(sampleBuffer)
+        }
+    }
+}
+
 // MARK: - AVCaptureFileOutputRecordingDelegate
 extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
         print("✅ Recording STARTED to: \(fileURL.lastPathComponent)")
-        for (i, conn) in connections.enumerated() {
-            print("   Connection \(i): orientation=\(conn.videoOrientation.rawValue), mirrored=\(conn.isVideoMirrored)")
-            for port in conn.inputPorts {
-                print("   Port: mediaType=\(port.mediaType), sourceDevice=\(port.sourceDeviceType?.rawValue ?? "nil")")
-            }
-        }
     }
     
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
@@ -610,42 +742,18 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
         
         if let error = error {
             print("❌ Recording error: \(error.localizedDescription)")
-            // Check if there's still a usable file
-            let nsError = error as NSError
-            if nsError.domain == AVFoundationErrorDomain && nsError.code == AVError.Code.maximumFileSizeReached.rawValue {
-                print("Max file size reached, but file should still be valid")
-            } else {
-                return
-            }
-        }
-        
-        // Check if file exists and has content
-        do {
-            let attrs = try FileManager.default.attributesOfItem(atPath: outputFileURL.path)
-            let fileSize = attrs[.size] as? Int64 ?? 0
-            print("📁 File size: \(fileSize) bytes")
-            
-            if fileSize == 0 {
-                print("❌ File is empty!")
-                return
-            }
-        } catch {
-            print("❌ Cannot read file attributes: \(error)")
             return
         }
         
-        // Save to Photos library
-        print("💾 Saving to Photos library...")
         PHPhotoLibrary.shared().performChanges {
             PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputFileURL)
         } completionHandler: { success, error in
             if success {
-                print("✅ Video saved to Photos: \(outputFileURL.lastPathComponent)")
+                print("✅ Video saved to Photos")
             } else if let error = error {
                 print("❌ Failed to save video: \(error.localizedDescription)")
             }
             
-            // Clean up temp file
             try? FileManager.default.removeItem(at: outputFileURL)
         }
     }
