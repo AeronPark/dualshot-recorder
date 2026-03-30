@@ -246,7 +246,7 @@ class CameraManager: NSObject, ObservableObject {
         }
     }
     
-    // MARK: Dual Lens Mode - Capture 4:3, crop both ways for max FOV
+    // MARK: Dual Lens Mode - Capture 16:9 landscape, full for landscape, crop for portrait
     private func setupDualLensSession() {
         guard let wideCamera = wideCamera else {
             print("Wide camera not available")
@@ -257,18 +257,17 @@ class CameraManager: NSObject, ObservableObject {
             return
         }
         
-        print("Setting up DUAL LENS session (4:3 capture, crop both ways)")
+        print("Setting up DUAL LENS session (16:9 landscape, crop for portrait)")
         
         let session = AVCaptureSession()
         session.beginConfiguration()
-        // Use photo preset for 4:3 aspect ratio (more sensor area)
-        session.sessionPreset = .photo
+        session.sessionPreset = selectedResolution == .uhd4k ? .hd4K3840x2160 : .hd1920x1080
         
         do {
             let videoInput = try AVCaptureDeviceInput(device: wideCamera)
             if session.canAddInput(videoInput) {
                 session.addInput(videoInput)
-                print("✅ Wide camera input added (4:3 mode)")
+                print("✅ Wide camera input added")
             }
             
             if let audioDevice = AVCaptureDevice.default(for: .audio),
@@ -286,8 +285,11 @@ class CameraManager: NSObject, ObservableObject {
             if session.canAddOutput(videoOutput) {
                 session.addOutput(videoOutput)
                 videoDataOutput = videoOutput
-                // No orientation set - we'll use raw 4:3 frames and crop both ways
-                print("✅ Video data output added (raw 4:3 frames)")
+                // Capture in LANDSCAPE orientation (native 16:9)
+                if let connection = videoOutput.connection(with: .video) {
+                    connection.videoOrientation = .landscapeRight
+                    print("📷 Dual Lens capture: landscape 16:9")
+                }
             }
             
             let audioOutput = AVCaptureAudioDataOutput()
@@ -877,24 +879,16 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
         let ciImage = CIImage(cvPixelBuffer: imageBuffer)
         
         if isDualLensMode {
-            // DUAL LENS: Crop 4:3 both ways for max FOV
-            // Frame is 4:3 (e.g., 4032x3024 or similar)
+            // DUAL LENS: Landscape frames (16:9), full for landscape, crop for portrait
+            // Frame is 16:9 landscape (e.g., 1920x1080)
             
-            // PORTRAIT (9:16): Crop center vertical strip
-            // Width needed = height * 9/16
-            let portraitCropWidth = frameHeight * 9.0 / 16.0
-            let portraitCropX = (frameWidth - portraitCropWidth) / 2.0
-            let portraitCropRect = CGRect(x: portraitCropX, y: 0, width: portraitCropWidth, height: frameHeight)
-            
-            if let input = portraitVideoInput, input.isReadyForMoreMediaData,
-               let adaptor = portraitPixelBufferAdaptor {
-                let croppedImage = ciImage.cropped(to: portraitCropRect)
-                    .transformed(by: CGAffineTransform(translationX: -portraitCropX, y: 0))
-                
-                // Scale to 1080x1920
-                let scaleX = 1080.0 / portraitCropWidth
-                let scaleY = 1920.0 / frameHeight
-                let scaledImage = croppedImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+            // LANDSCAPE: Write full frame directly via pixel buffer (same dimensions)
+            if let input = landscapeVideoInput, input.isReadyForMoreMediaData,
+               let adaptor = landscapePixelBufferAdaptor {
+                // Scale if needed (in case sensor resolution differs from output)
+                let scaleX = 1920.0 / frameWidth
+                let scaleY = 1080.0 / frameHeight
+                let scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
                 
                 if let pixelBufferPool = adaptor.pixelBufferPool {
                     var newPixelBuffer: CVPixelBuffer?
@@ -906,20 +900,21 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
                 }
             }
             
-            // LANDSCAPE (16:9): Crop center horizontal strip
-            // Height needed = width * 9/16
-            let landscapeCropHeight = frameWidth * 9.0 / 16.0
-            let landscapeCropY = (frameHeight - landscapeCropHeight) / 2.0
-            let landscapeCropRect = CGRect(x: 0, y: landscapeCropY, width: frameWidth, height: landscapeCropHeight)
+            // PORTRAIT: Crop center vertical strip from landscape frame
+            // From 16:9, crop to 9:16 ratio (narrow vertical strip)
+            // Width needed = height * 9/16
+            let portraitCropWidth = frameHeight * 9.0 / 16.0
+            let portraitCropX = (frameWidth - portraitCropWidth) / 2.0
+            let portraitCropRect = CGRect(x: portraitCropX, y: 0, width: portraitCropWidth, height: frameHeight)
             
-            if let input = landscapeVideoInput, input.isReadyForMoreMediaData,
-               let adaptor = landscapePixelBufferAdaptor {
-                let croppedImage = ciImage.cropped(to: landscapeCropRect)
-                    .transformed(by: CGAffineTransform(translationX: 0, y: -landscapeCropY))
+            if let input = portraitVideoInput, input.isReadyForMoreMediaData,
+               let adaptor = portraitPixelBufferAdaptor {
+                let croppedImage = ciImage.cropped(to: portraitCropRect)
+                    .transformed(by: CGAffineTransform(translationX: -portraitCropX, y: 0))
                 
-                // Scale to 1920x1080
-                let scaleX = 1920.0 / frameWidth
-                let scaleY = 1080.0 / landscapeCropHeight
+                // Scale to 1920x1080 (will display as portrait via 90° transform)
+                let scaleX = 1920.0 / portraitCropWidth
+                let scaleY = 1080.0 / frameHeight
                 let scaledImage = croppedImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
                 
                 if let pixelBufferPool = adaptor.pixelBufferPool {
