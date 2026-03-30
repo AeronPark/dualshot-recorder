@@ -74,7 +74,7 @@ struct SettingsView: View {
                                 }
                             }
                         }
-                        .disabled(mode == .dual && !cameraManager.isMultiCamSupported)
+                        .disabled((mode == .dualLens || mode == .singleLens) && !cameraManager.isMultiCamSupported)
                     }
                 }
                 
@@ -138,7 +138,7 @@ struct SettingsView: View {
         }
         
         // Double for dual recording
-        let totalMbPerMinute = cameraManager.recordingMode == .dual ? mbPerMinute * 2 : mbPerMinute
+        let totalMbPerMinute = (cameraManager.recordingMode == .dualLens || cameraManager.recordingMode == .singleLens) ? mbPerMinute * 2 : mbPerMinute
         
         let availableMB = Double(getAvailableStorage()) / 1_000_000
         let minutes = availableMB / totalMbPerMinute

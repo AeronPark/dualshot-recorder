@@ -618,7 +618,7 @@ class CameraManager: NSObject, ObservableObject {
     private func stopRecording() {
         print("Stopping recording...")
         
-        if recordingMode == .dual && isDualModeActive {
+        if (recordingMode == .dualLens || recordingMode == .singleLens) && isDualModeActive {
             stopDualRecording()
         } else {
             if let output = movieFileOutput, output.isRecording {
