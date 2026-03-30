@@ -139,12 +139,16 @@ class CameraManager: NSObject, ObservableObject {
     private nonisolated(unsafe) var landscapeAssetWriter: AVAssetWriter?
     private nonisolated(unsafe) var landscapeVideoInput: AVAssetWriterInput?
     private nonisolated(unsafe) var landscapeAudioInput: AVAssetWriterInput?
+    private nonisolated(unsafe) var landscapePixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     
     private nonisolated(unsafe) var portraitVideoURL: URL?
     private nonisolated(unsafe) var landscapeVideoURL: URL?
     
     private nonisolated(unsafe) var isWritingStarted = false
     private nonisolated(unsafe) var sessionStartTime: CMTime?
+    
+    // For cropping
+    private nonisolated(unsafe) var ciContext: CIContext?
     
     // For single mode: movie file output
     private var movieFileOutput: AVCaptureMovieFileOutput?
@@ -424,13 +428,14 @@ class CameraManager: NSObject, ObservableObject {
         // Setup asset writers
         do {
             // Capturing in PORTRAIT orientation, so frames are 9:16 (e.g., 1080x1920)
+            // Landscape will be a CENTER CROP of portrait to get 16:9
             let audioSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVSampleRateKey: 44100,
                 AVNumberOfChannelsKey: 2
             ]
             
-            // PORTRAIT writer - frames are already portrait, no transform needed
+            // PORTRAIT writer - full frame, no crop
             portraitAssetWriter = try AVAssetWriter(url: portraitVideoURL!, fileType: selectedFileFormat.fileType)
             
             let portraitVideoSettings: [String: Any] = [
@@ -440,7 +445,6 @@ class CameraManager: NSObject, ObservableObject {
             ]
             portraitVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: portraitVideoSettings)
             portraitVideoInput?.expectsMediaDataInRealTime = true
-            // No transform - frames are already portrait-oriented
             
             portraitAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             portraitAudioInput?.expectsMediaDataInRealTime = true
@@ -453,24 +457,34 @@ class CameraManager: NSObject, ObservableObject {
                     writer.add(audioInput)
                 }
             }
-            print("✅ Portrait writer configured (no transform)")
+            print("✅ Portrait writer configured (full frame)")
             
-            // LANDSCAPE writer - rotate portrait frames -90° for landscape display
+            // LANDSCAPE writer - center crop of portrait to 16:9
+            // For 1080x1920 portrait, landscape crop is 1080x608 (center strip)
+            // We'll scale that up to 1920x1080 for proper landscape video
             landscapeAssetWriter = try AVAssetWriter(url: landscapeVideoURL!, fileType: selectedFileFormat.fileType)
             
-            // Same dimensions as portrait input, transform handles rotation
             let landscapeVideoSettings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.h264,
-                AVVideoWidthKey: selectedResolution.portraitSize.width,
-                AVVideoHeightKey: selectedResolution.portraitSize.height
+                AVVideoWidthKey: selectedResolution.landscapeSize.width,
+                AVVideoHeightKey: selectedResolution.landscapeSize.height
             ]
             landscapeVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: landscapeVideoSettings)
             landscapeVideoInput?.expectsMediaDataInRealTime = true
-            // Rotate -90° (counter-clockwise) for landscape display
-            landscapeVideoInput?.transform = CGAffineTransform(rotationAngle: -.pi / 2)
             
             landscapeAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             landscapeAudioInput?.expectsMediaDataInRealTime = true
+            
+            // Create pixel buffer adaptor for landscape (to write cropped frames)
+            let pixelBufferAttributes: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: selectedResolution.landscapeSize.width,
+                kCVPixelBufferHeightKey as String: selectedResolution.landscapeSize.height
+            ]
+            landscapePixelBufferAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+                assetWriterInput: landscapeVideoInput!,
+                sourcePixelBufferAttributes: pixelBufferAttributes
+            )
             
             if let writer = landscapeAssetWriter {
                 if let videoInput = landscapeVideoInput, writer.canAdd(videoInput) {
@@ -480,7 +494,11 @@ class CameraManager: NSObject, ObservableObject {
                     writer.add(audioInput)
                 }
             }
-            print("✅ Landscape writer configured (with -90° transform)")
+            
+            // Create CIContext for cropping
+            ciContext = CIContext(options: [.useSoftwareRenderer: false])
+            
+            print("✅ Landscape writer configured with pixel buffer adaptor for cropping")
             
             isWritingStarted = false
             sessionStartTime = nil
@@ -606,10 +624,12 @@ class CameraManager: NSObject, ObservableObject {
         landscapeAssetWriter = nil
         landscapeVideoInput = nil
         landscapeAudioInput = nil
+        landscapePixelBufferAdaptor = nil
         portraitVideoURL = nil
         landscapeVideoURL = nil
         isWritingStarted = false
         sessionStartTime = nil
+        ciContext = nil
         writerLock.unlock()
     }
     
@@ -722,17 +742,17 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
         writerLock.lock()
         defer { writerLock.unlock() }
         
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        
+        let frameWidth = CVPixelBufferGetWidth(imageBuffer)
+        let frameHeight = CVPixelBufferGetHeight(imageBuffer)
+        
         // Start writers on first frame
         if !isWritingStarted {
             isWritingStarted = true
             sessionStartTime = timestamp
             
-            // Log actual frame dimensions
-            if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
-                let width = CVPixelBufferGetWidth(imageBuffer)
-                let height = CVPixelBufferGetHeight(imageBuffer)
-                print("📐 Actual frame dimensions: \(width) x \(height)")
-            }
+            print("📐 Actual frame dimensions: \(frameWidth) x \(frameHeight)")
             
             portraitAssetWriter?.startWriting()
             portraitAssetWriter?.startSession(atSourceTime: timestamp)
@@ -743,14 +763,44 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
             print("✅ Started writing at \(timestamp.seconds)")
         }
         
-        // Write to portrait
+        // Write full frame to portrait
         if let input = portraitVideoInput, input.isReadyForMoreMediaData {
             input.append(sampleBuffer)
         }
         
-        // Write to landscape
-        if let input = landscapeVideoInput, input.isReadyForMoreMediaData {
-            input.append(sampleBuffer)
+        // Crop center for landscape and write
+        if let input = landscapeVideoInput, input.isReadyForMoreMediaData,
+           let adaptor = landscapePixelBufferAdaptor,
+           let context = ciContext {
+            
+            // Calculate crop rect for 16:9 from portrait (9:16)
+            // Portrait is 1080x1920, we need center strip that's 16:9
+            // Height of crop = width * 9/16 = 1080 * 9/16 = 607.5 ≈ 608
+            let cropHeight = CGFloat(frameWidth) * 9.0 / 16.0
+            let cropY = (CGFloat(frameHeight) - cropHeight) / 2.0
+            
+            // Create CIImage and crop
+            let ciImage = CIImage(cvPixelBuffer: imageBuffer)
+            let cropRect = CGRect(x: 0, y: cropY, width: CGFloat(frameWidth), height: cropHeight)
+            let croppedImage = ciImage.cropped(to: cropRect)
+            
+            // Scale to landscape dimensions (1920x1080)
+            let scaleX = CGFloat(1920) / CGFloat(frameWidth)
+            let scaleY = CGFloat(1080) / cropHeight
+            let scaledImage = croppedImage
+                .transformed(by: CGAffineTransform(translationX: 0, y: -cropY))
+                .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+            
+            // Get pixel buffer from pool
+            if let pixelBufferPool = adaptor.pixelBufferPool {
+                var newPixelBuffer: CVPixelBuffer?
+                CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool, &newPixelBuffer)
+                
+                if let outputBuffer = newPixelBuffer {
+                    context.render(scaledImage, to: outputBuffer)
+                    adaptor.append(outputBuffer, withPresentationTime: timestamp)
+                }
+            }
         }
     }
     
