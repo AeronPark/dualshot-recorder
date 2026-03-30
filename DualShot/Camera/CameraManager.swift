@@ -130,19 +130,21 @@ class CameraManager: NSObject, ObservableObject {
     private var videoDataOutput: AVCaptureVideoDataOutput?
     private var audioDataOutput: AVCaptureAudioDataOutput?
     
-    private var portraitAssetWriter: AVAssetWriter?
-    private var portraitVideoInput: AVAssetWriterInput?
-    private var portraitAudioInput: AVAssetWriterInput?
+    // Writer state - accessed from background queues, protected by writerLock
+    private let writerLock = NSLock()
+    private nonisolated(unsafe) var portraitAssetWriter: AVAssetWriter?
+    private nonisolated(unsafe) var portraitVideoInput: AVAssetWriterInput?
+    private nonisolated(unsafe) var portraitAudioInput: AVAssetWriterInput?
     
-    private var landscapeAssetWriter: AVAssetWriter?
-    private var landscapeVideoInput: AVAssetWriterInput?
-    private var landscapeAudioInput: AVAssetWriterInput?
+    private nonisolated(unsafe) var landscapeAssetWriter: AVAssetWriter?
+    private nonisolated(unsafe) var landscapeVideoInput: AVAssetWriterInput?
+    private nonisolated(unsafe) var landscapeAudioInput: AVAssetWriterInput?
     
-    private var portraitVideoURL: URL?
-    private var landscapeVideoURL: URL?
+    private nonisolated(unsafe) var portraitVideoURL: URL?
+    private nonisolated(unsafe) var landscapeVideoURL: URL?
     
-    private var isWritingStarted = false
-    private var sessionStartTime: CMTime?
+    private nonisolated(unsafe) var isWritingStarted = false
+    private nonisolated(unsafe) var sessionStartTime: CMTime?
     
     // For single mode: movie file output
     private var movieFileOutput: AVCaptureMovieFileOutput?
@@ -506,14 +508,23 @@ class CameraManager: NSObject, ObservableObject {
         videoWritingQueue.async { [weak self] in
             guard let self = self else { return }
             
+            self.writerLock.lock()
+            
             self.portraitVideoInput?.markAsFinished()
             self.portraitAudioInput?.markAsFinished()
             self.landscapeVideoInput?.markAsFinished()
             self.landscapeAudioInput?.markAsFinished()
             
+            let portraitWriter = self.portraitAssetWriter
+            let landscapeWriter = self.landscapeAssetWriter
+            let portraitURL = self.portraitVideoURL
+            let landscapeURL = self.landscapeVideoURL
+            
+            self.writerLock.unlock()
+            
             let group = DispatchGroup()
             
-            if let writer = self.portraitAssetWriter, writer.status == .writing {
+            if let writer = portraitWriter, writer.status == .writing {
                 group.enter()
                 writer.finishWriting {
                     print("🎬 Portrait recording finished")
@@ -521,7 +532,7 @@ class CameraManager: NSObject, ObservableObject {
                 }
             }
             
-            if let writer = self.landscapeAssetWriter, writer.status == .writing {
+            if let writer = landscapeWriter, writer.status == .writing {
                 group.enter()
                 writer.finishWriting {
                     print("🎬 Landscape recording finished")
@@ -530,18 +541,14 @@ class CameraManager: NSObject, ObservableObject {
             }
             
             group.notify(queue: .main) { [weak self] in
-                self?.saveRecordingsToPhotos()
+                if let url = portraitURL {
+                    self?.saveVideoToPhotos(url: url, name: "Portrait")
+                }
+                if let url = landscapeURL {
+                    self?.saveVideoToPhotos(url: url, name: "Landscape")
+                }
                 self?.cleanupWriters()
             }
-        }
-    }
-    
-    private func saveRecordingsToPhotos() {
-        if let portraitURL = portraitVideoURL {
-            saveVideoToPhotos(url: portraitURL, name: "Portrait")
-        }
-        if let landscapeURL = landscapeVideoURL {
-            saveVideoToPhotos(url: landscapeURL, name: "Landscape")
         }
     }
     
@@ -580,14 +587,18 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     private func cleanupWriters() {
+        writerLock.lock()
         portraitAssetWriter = nil
         portraitVideoInput = nil
         portraitAudioInput = nil
         landscapeAssetWriter = nil
         landscapeVideoInput = nil
         landscapeAudioInput = nil
+        portraitVideoURL = nil
+        landscapeVideoURL = nil
         isWritingStarted = false
         sessionStartTime = nil
+        writerLock.unlock()
     }
     
     // MARK: Timer
@@ -696,6 +707,9 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
     }
     
     nonisolated private func processVideoSampleBuffer(_ sampleBuffer: CMSampleBuffer, timestamp: CMTime) {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        
         // Start writers on first frame
         if !isWritingStarted {
             isWritingStarted = true
@@ -722,6 +736,9 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
     }
     
     nonisolated private func processAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer, timestamp: CMTime) {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        
         guard isWritingStarted else { return }
         
         // Write to portrait
