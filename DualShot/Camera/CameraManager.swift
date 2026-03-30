@@ -426,7 +426,7 @@ class CameraManager: NSObject, ObservableObject {
                 AVNumberOfChannelsKey: 2
             ]
             
-            // LANDSCAPE writer - use frames directly, no transform (true 16:9 video)
+            // LANDSCAPE writer - 180° rotation to correct sensor orientation
             landscapeAssetWriter = try AVAssetWriter(url: landscapeVideoURL!, fileType: selectedFileFormat.fileType)
             
             let landscapeVideoSettings: [String: Any] = [
@@ -436,7 +436,8 @@ class CameraManager: NSObject, ObservableObject {
             ]
             landscapeVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: landscapeVideoSettings)
             landscapeVideoInput?.expectsMediaDataInRealTime = true
-            // No transform - native landscape frames
+            // 180° rotation to match portrait's corrected orientation
+            landscapeVideoInput?.transform = CGAffineTransform(rotationAngle: .pi)
             
             landscapeAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             landscapeAudioInput?.expectsMediaDataInRealTime = true
