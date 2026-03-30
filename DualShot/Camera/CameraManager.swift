@@ -234,29 +234,44 @@ class CameraManager: NSObject, ObservableObject {
         }
         
         print("Setting up multi-cam session with wide + ultra-wide cameras")
+        print("📷 Wide camera: \(wideCamera.localizedName) - \(wideCamera.uniqueID)")
+        print("📷 Ultra-wide camera: \(ultraWideCamera.localizedName) - \(ultraWideCamera.uniqueID)")
+        
+        // Verify they're different cameras
+        if wideCamera.uniqueID == ultraWideCamera.uniqueID {
+            print("⚠️ WARNING: Wide and ultra-wide have same ID - this shouldn't happen!")
+        }
         
         let session = AVCaptureMultiCamSession()
         
         session.beginConfiguration()
         
         do {
-            // Wide camera input (for landscape)
+            // Wide camera input (for landscape - 1x zoom)
             let wideInput = try AVCaptureDeviceInput(device: wideCamera)
             if session.canAddInput(wideInput) {
                 session.addInputWithNoConnections(wideInput)
+                print("✅ Wide camera input added")
+            } else {
+                print("❌ Cannot add wide camera input")
             }
             
-            // Ultra-wide camera input (for portrait)
+            // Ultra-wide camera input (for portrait - 0.5x zoom)
             let ultraWideInput = try AVCaptureDeviceInput(device: ultraWideCamera)
             if session.canAddInput(ultraWideInput) {
                 session.addInputWithNoConnections(ultraWideInput)
+                print("✅ Ultra-wide camera input added")
+            } else {
+                print("❌ Cannot add ultra-wide camera input")
             }
             
             // Audio input
-            if let audioDevice = AVCaptureDevice.default(for: .audio),
-               let audioInput = try? AVCaptureDeviceInput(device: audioDevice) {
-                if session.canAddInput(audioInput) {
+            var audioInput: AVCaptureDeviceInput?
+            if let audioDevice = AVCaptureDevice.default(for: .audio) {
+                audioInput = try? AVCaptureDeviceInput(device: audioDevice)
+                if let audioInput = audioInput, session.canAddInput(audioInput) {
                     session.addInputWithNoConnections(audioInput)
+                    print("✅ Audio input added")
                 }
             }
             
@@ -266,11 +281,29 @@ class CameraManager: NSObject, ObservableObject {
                 session.addOutputWithNoConnections(portraitOutput)
                 
                 // Connect ultra-wide video
-                if let ultraWidePort = ultraWideInput.ports(for: .video, sourceDeviceType: .builtInUltraWideCamera, sourceDevicePosition: .back).first {
+                let ultraWidePorts = ultraWideInput.ports(for: .video, sourceDeviceType: .builtInUltraWideCamera, sourceDevicePosition: .back)
+                print("📷 Ultra-wide ports found: \(ultraWidePorts.count)")
+                
+                if let ultraWidePort = ultraWidePorts.first {
                     let connection = AVCaptureConnection(inputPorts: [ultraWidePort], output: portraitOutput)
                     connection.videoOrientation = .portrait
                     if session.canAddConnection(connection) {
                         session.addConnection(connection)
+                        print("✅ Portrait video connection added (ultra-wide)")
+                    } else {
+                        print("❌ Cannot add portrait video connection")
+                    }
+                } else {
+                    print("❌ No ultra-wide port found!")
+                }
+                
+                // Connect audio to portrait output
+                if let audioInput = audioInput,
+                   let audioPort = audioInput.ports(for: .audio, sourceDeviceType: nil, sourceDevicePosition: .unspecified).first {
+                    let audioConnection = AVCaptureConnection(inputPorts: [audioPort], output: portraitOutput)
+                    if session.canAddConnection(audioConnection) {
+                        session.addConnection(audioConnection)
+                        print("✅ Portrait audio connection added")
                     }
                 }
             }
@@ -282,11 +315,35 @@ class CameraManager: NSObject, ObservableObject {
                 session.addOutputWithNoConnections(landscapeOutput)
                 
                 // Connect wide video
-                if let widePort = wideInput.ports(for: .video, sourceDeviceType: .builtInWideAngleCamera, sourceDevicePosition: .back).first {
+                let widePorts = wideInput.ports(for: .video, sourceDeviceType: .builtInWideAngleCamera, sourceDevicePosition: .back)
+                print("📷 Wide ports found: \(widePorts.count)")
+                
+                if let widePort = widePorts.first {
                     let connection = AVCaptureConnection(inputPorts: [widePort], output: landscapeOutput)
                     connection.videoOrientation = .landscapeRight
+                    // Ensure video is NOT mirrored (back cameras shouldn't mirror)
+                    if connection.isVideoMirroringSupported {
+                        connection.isVideoMirrored = false
+                        print("📷 Video mirroring set to false")
+                    }
                     if session.canAddConnection(connection) {
                         session.addConnection(connection)
+                        print("✅ Landscape video connection added (wide camera)")
+                        print("   Orientation: landscapeRight, Mirrored: \(connection.isVideoMirrored)")
+                    } else {
+                        print("❌ Cannot add landscape video connection")
+                    }
+                } else {
+                    print("❌ No wide port found!")
+                }
+                
+                // Connect audio to landscape output
+                if let audioInput = audioInput,
+                   let audioPort = audioInput.ports(for: .audio, sourceDeviceType: nil, sourceDevicePosition: .unspecified).first {
+                    let audioConnection = AVCaptureConnection(inputPorts: [audioPort], output: landscapeOutput)
+                    if session.canAddConnection(audioConnection) {
+                        session.addConnection(audioConnection)
+                        print("✅ Landscape audio connection added")
                     }
                 }
             }
@@ -543,6 +600,12 @@ class CameraManager: NSObject, ObservableObject {
 extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
         print("✅ Recording STARTED to: \(fileURL.lastPathComponent)")
+        for (i, conn) in connections.enumerated() {
+            print("   Connection \(i): orientation=\(conn.videoOrientation.rawValue), mirrored=\(conn.isVideoMirrored)")
+            for port in conn.inputPorts {
+                print("   Port: mediaType=\(port.mediaType), sourceDevice=\(port.sourceDeviceType?.rawValue ?? "nil")")
+            }
+        }
     }
     
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
