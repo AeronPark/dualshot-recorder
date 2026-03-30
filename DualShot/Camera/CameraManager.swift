@@ -147,8 +147,12 @@ class CameraManager: NSObject, ObservableObject {
         return AVCaptureMultiCamSession.isMultiCamSupported
     }
     
-    // MARK: Preview Layer
+    // MARK: Preview Layers
     var previewLayer: AVCaptureVideoPreviewLayer?
+    var landscapePreviewLayer: AVCaptureVideoPreviewLayer?
+    
+    // Store wide camera connection for PiP preview
+    private var wideVideoDataOutput: AVCaptureVideoDataOutput?
     
     // MARK: Initialization
     override init() {
@@ -348,6 +352,23 @@ class CameraManager: NSObject, ObservableObject {
                 }
             }
             landscapeMovieOutput = landscapeOutput
+            
+            // Create landscape preview layer (PiP for wide camera)
+            let landscapePreview = AVCaptureVideoPreviewLayer(sessionWithNoConnection: session)
+            landscapePreview.videoGravity = .resizeAspectFill
+            
+            // Connect wide camera to landscape preview
+            if let wideVideoPort = wideInput.ports(for: .video, sourceDeviceType: .builtInWideAngleCamera, sourceDevicePosition: .back).first {
+                let previewConnection = AVCaptureConnection(inputPort: wideVideoPort, videoPreviewLayer: landscapePreview)
+                previewConnection.videoOrientation = .landscapeRight
+                if session.canAddConnection(previewConnection) {
+                    session.addConnection(previewConnection)
+                    self.landscapePreviewLayer = landscapePreview
+                    print("✅ Landscape PiP preview layer created")
+                } else {
+                    print("❌ Cannot add landscape preview connection")
+                }
+            }
             
         } catch {
             errorMessage = "Failed to setup multi-cam: \(error.localizedDescription)"
