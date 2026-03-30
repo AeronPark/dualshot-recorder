@@ -324,7 +324,8 @@ class CameraManager: NSObject, ObservableObject {
                 
                 if let widePort = widePorts.first {
                     let connection = AVCaptureConnection(inputPorts: [widePort], output: landscapeOutput)
-                    connection.videoOrientation = .landscapeRight
+                    // Use landscapeLeft to avoid horizontal flip
+                    connection.videoOrientation = .landscapeLeft
                     // Ensure video is NOT mirrored (back cameras shouldn't mirror)
                     if connection.isVideoMirroringSupported {
                         connection.isVideoMirrored = false
@@ -333,7 +334,7 @@ class CameraManager: NSObject, ObservableObject {
                     if session.canAddConnection(connection) {
                         session.addConnection(connection)
                         print("✅ Landscape video connection added (wide camera)")
-                        print("   Orientation: landscapeRight, Mirrored: \(connection.isVideoMirrored)")
+                        print("   Orientation: landscapeLeft, Mirrored: \(connection.isVideoMirrored)")
                     } else {
                         print("❌ Cannot add landscape video connection")
                     }
@@ -360,7 +361,7 @@ class CameraManager: NSObject, ObservableObject {
             // Connect wide camera to landscape preview
             if let wideVideoPort = wideInput.ports(for: .video, sourceDeviceType: .builtInWideAngleCamera, sourceDevicePosition: .back).first {
                 let previewConnection = AVCaptureConnection(inputPort: wideVideoPort, videoPreviewLayer: landscapePreview)
-                previewConnection.videoOrientation = .landscapeRight
+                previewConnection.videoOrientation = .landscapeLeft
                 if session.canAddConnection(previewConnection) {
                     session.addConnection(previewConnection)
                     self.landscapePreviewLayer = landscapePreview
