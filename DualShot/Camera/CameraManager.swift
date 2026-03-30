@@ -276,11 +276,10 @@ class CameraManager: NSObject, ObservableObject {
             if session.canAddOutput(videoOutput) {
                 session.addOutput(videoOutput)
                 videoDataOutput = videoOutput
-                // Don't set orientation - use raw sensor frames
-                // The asset writer transforms will handle display orientation
+                // Capture in PORTRAIT - frames will be 1080x1920
                 if let connection = videoOutput.connection(with: .video) {
-                    print("📷 Video capture - using raw sensor orientation")
-                    print("   Natural orientation: \(connection.videoOrientation.rawValue)")
+                    connection.videoOrientation = .portrait
+                    print("📷 Video capture orientation: PORTRAIT")
                 }
                 print("✅ Video data output added")
             }
@@ -419,52 +418,24 @@ class CameraManager: NSObject, ObservableObject {
         
         // Setup asset writers
         do {
-            // Capturing in LANDSCAPE orientation, so frames are 16:9 (e.g., 1920x1080)
+            // Capturing in PORTRAIT orientation, so frames are 9:16 (e.g., 1080x1920)
             let audioSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVSampleRateKey: 44100,
                 AVNumberOfChannelsKey: 2
             ]
             
-            // LANDSCAPE writer - horizontal flip to correct mirroring
-            landscapeAssetWriter = try AVAssetWriter(url: landscapeVideoURL!, fileType: selectedFileFormat.fileType)
-            
-            let landscapeVideoSettings: [String: Any] = [
-                AVVideoCodecKey: AVVideoCodecType.h264,
-                AVVideoWidthKey: selectedResolution.landscapeSize.width,
-                AVVideoHeightKey: selectedResolution.landscapeSize.height
-            ]
-            landscapeVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: landscapeVideoSettings)
-            landscapeVideoInput?.expectsMediaDataInRealTime = true
-            // Horizontal flip to un-mirror the landscape output
-            landscapeVideoInput?.transform = CGAffineTransform(scaleX: -1, y: 1)
-            
-            landscapeAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-            landscapeAudioInput?.expectsMediaDataInRealTime = true
-            
-            if let writer = landscapeAssetWriter {
-                if let videoInput = landscapeVideoInput, writer.canAdd(videoInput) {
-                    writer.add(videoInput)
-                }
-                if let audioInput = landscapeAudioInput, writer.canAdd(audioInput) {
-                    writer.add(audioInput)
-                }
-            }
-            print("✅ Landscape writer configured (no transform - native 16:9)")
-            
-            // PORTRAIT writer - same frames with 90° rotation for portrait display
+            // PORTRAIT writer - frames are already portrait, no transform needed
             portraitAssetWriter = try AVAssetWriter(url: portraitVideoURL!, fileType: selectedFileFormat.fileType)
             
-            // Use same dimensions as input (landscape), transform handles display rotation
             let portraitVideoSettings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.h264,
-                AVVideoWidthKey: selectedResolution.landscapeSize.width,
-                AVVideoHeightKey: selectedResolution.landscapeSize.height
+                AVVideoWidthKey: selectedResolution.portraitSize.width,
+                AVVideoHeightKey: selectedResolution.portraitSize.height
             ]
             portraitVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: portraitVideoSettings)
             portraitVideoInput?.expectsMediaDataInRealTime = true
-            // Rotate 90° clockwise for portrait display
-            portraitVideoInput?.transform = CGAffineTransform(rotationAngle: .pi / 2)
+            // No transform - frames are already portrait-oriented
             
             portraitAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             portraitAudioInput?.expectsMediaDataInRealTime = true
@@ -477,7 +448,34 @@ class CameraManager: NSObject, ObservableObject {
                     writer.add(audioInput)
                 }
             }
-            print("✅ Portrait writer configured (with 90° transform)")
+            print("✅ Portrait writer configured (no transform)")
+            
+            // LANDSCAPE writer - rotate portrait frames -90° for landscape display
+            landscapeAssetWriter = try AVAssetWriter(url: landscapeVideoURL!, fileType: selectedFileFormat.fileType)
+            
+            // Same dimensions as portrait input, transform handles rotation
+            let landscapeVideoSettings: [String: Any] = [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: selectedResolution.portraitSize.width,
+                AVVideoHeightKey: selectedResolution.portraitSize.height
+            ]
+            landscapeVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: landscapeVideoSettings)
+            landscapeVideoInput?.expectsMediaDataInRealTime = true
+            // Rotate -90° (counter-clockwise) for landscape display
+            landscapeVideoInput?.transform = CGAffineTransform(rotationAngle: -.pi / 2)
+            
+            landscapeAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+            landscapeAudioInput?.expectsMediaDataInRealTime = true
+            
+            if let writer = landscapeAssetWriter {
+                if let videoInput = landscapeVideoInput, writer.canAdd(videoInput) {
+                    writer.add(videoInput)
+                }
+                if let audioInput = landscapeAudioInput, writer.canAdd(audioInput) {
+                    writer.add(audioInput)
+                }
+            }
+            print("✅ Landscape writer configured (with -90° transform)")
             
             isWritingStarted = false
             sessionStartTime = nil
