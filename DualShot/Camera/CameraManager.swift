@@ -228,45 +228,31 @@ class CameraManager: NSObject, ObservableObject {
             return
         }
         
-        guard let wideCamera = wideCamera, let ultraWideCamera = ultraWideCamera else {
-            print("Dual cameras not available")
-            errorMessage = "Dual cameras not available"
+        guard let wideCamera = wideCamera else {
+            print("Wide camera not available")
+            errorMessage = "Wide camera not available"
             isDualModeActive = false
             recordingMode = .wideOnly
             setupSingleCamSession()
             return
         }
         
-        print("Setting up multi-cam session with wide + ultra-wide cameras")
+        print("Setting up dual output session (portrait + landscape from same camera)")
         print("📷 Wide camera: \(wideCamera.localizedName) - \(wideCamera.uniqueID)")
-        print("📷 Ultra-wide camera: \(ultraWideCamera.localizedName) - \(ultraWideCamera.uniqueID)")
-        
-        // Verify they're different cameras
-        if wideCamera.uniqueID == ultraWideCamera.uniqueID {
-            print("⚠️ WARNING: Wide and ultra-wide have same ID - this shouldn't happen!")
-        }
         
         let session = AVCaptureMultiCamSession()
         
         session.beginConfiguration()
         
         do {
-            // Wide camera input (for landscape - 1x zoom)
+            // Wide camera input - used for BOTH portrait and landscape outputs
+            // (same camera, different orientation transforms)
             let wideInput = try AVCaptureDeviceInput(device: wideCamera)
             if session.canAddInput(wideInput) {
                 session.addInputWithNoConnections(wideInput)
-                print("✅ Wide camera input added")
+                print("✅ Wide camera input added (used for both outputs)")
             } else {
                 print("❌ Cannot add wide camera input")
-            }
-            
-            // Ultra-wide camera input (for portrait - 0.5x zoom)
-            let ultraWideInput = try AVCaptureDeviceInput(device: ultraWideCamera)
-            if session.canAddInput(ultraWideInput) {
-                session.addInputWithNoConnections(ultraWideInput)
-                print("✅ Ultra-wide camera input added")
-            } else {
-                print("❌ Cannot add ultra-wide camera input")
             }
             
             // Audio input
@@ -279,26 +265,30 @@ class CameraManager: NSObject, ObservableObject {
                 }
             }
             
-            // Portrait output (from ultra-wide)
+            // Both outputs use the WIDE camera, just different orientations
+            // Portrait: 9:16 (rotated 90°)
+            // Landscape: 16:9 (native sensor orientation)
+            
+            let widePorts = wideInput.ports(for: .video, sourceDeviceType: .builtInWideAngleCamera, sourceDevicePosition: .back)
+            print("📷 Wide ports found: \(widePorts.count)")
+            
+            guard let widePort = widePorts.first else {
+                print("❌ No wide port found!")
+                throw NSError(domain: "CameraManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Wide camera port not found"])
+            }
+            
+            // Portrait output (9:16 - rotated for vertical viewing)
             let portraitOutput = AVCaptureMovieFileOutput()
             if session.canAddOutput(portraitOutput) {
                 session.addOutputWithNoConnections(portraitOutput)
                 
-                // Connect ultra-wide video
-                let ultraWidePorts = ultraWideInput.ports(for: .video, sourceDeviceType: .builtInUltraWideCamera, sourceDevicePosition: .back)
-                print("📷 Ultra-wide ports found: \(ultraWidePorts.count)")
-                
-                if let ultraWidePort = ultraWidePorts.first {
-                    let connection = AVCaptureConnection(inputPorts: [ultraWidePort], output: portraitOutput)
-                    connection.videoOrientation = .portrait
-                    if session.canAddConnection(connection) {
-                        session.addConnection(connection)
-                        print("✅ Portrait video connection added (ultra-wide)")
-                    } else {
-                        print("❌ Cannot add portrait video connection")
-                    }
+                let portraitConnection = AVCaptureConnection(inputPorts: [widePort], output: portraitOutput)
+                portraitConnection.videoOrientation = .portrait
+                if session.canAddConnection(portraitConnection) {
+                    session.addConnection(portraitConnection)
+                    print("✅ Portrait video connection added (wide camera, portrait orientation)")
                 } else {
-                    print("❌ No ultra-wide port found!")
+                    print("❌ Cannot add portrait video connection")
                 }
                 
                 // Connect audio to portrait output
@@ -313,34 +303,18 @@ class CameraManager: NSObject, ObservableObject {
             }
             portraitMovieOutput = portraitOutput
             
-            // Landscape output (from wide)
+            // Landscape output (16:9 - native horizontal viewing)
             let landscapeOutput = AVCaptureMovieFileOutput()
             if session.canAddOutput(landscapeOutput) {
                 session.addOutputWithNoConnections(landscapeOutput)
                 
-                // Connect wide video
-                let widePorts = wideInput.ports(for: .video, sourceDeviceType: .builtInWideAngleCamera, sourceDevicePosition: .back)
-                print("📷 Wide ports found: \(widePorts.count)")
-                
-                if let widePort = widePorts.first {
-                    let connection = AVCaptureConnection(inputPorts: [widePort], output: landscapeOutput)
-                    // TEST: Use portrait orientation same as other output
-                    // This will help verify cameras are actually different
-                    connection.videoOrientation = .portrait
-                    // Ensure video is NOT mirrored (back cameras shouldn't mirror)
-                    if connection.isVideoMirroringSupported {
-                        connection.isVideoMirrored = false
-                        print("📷 Video mirroring set to false")
-                    }
-                    if session.canAddConnection(connection) {
-                        session.addConnection(connection)
-                        print("✅ Landscape video connection added (wide camera)")
-                        print("   Orientation: portrait (TEST), Mirrored: \(connection.isVideoMirrored)")
-                    } else {
-                        print("❌ Cannot add landscape video connection")
-                    }
+                let landscapeConnection = AVCaptureConnection(inputPorts: [widePort], output: landscapeOutput)
+                landscapeConnection.videoOrientation = .landscapeRight
+                if session.canAddConnection(landscapeConnection) {
+                    session.addConnection(landscapeConnection)
+                    print("✅ Landscape video connection added (wide camera, landscape orientation)")
                 } else {
-                    print("❌ No wide port found!")
+                    print("❌ Cannot add landscape video connection")
                 }
                 
                 // Connect audio to landscape output
@@ -355,21 +329,19 @@ class CameraManager: NSObject, ObservableObject {
             }
             landscapeMovieOutput = landscapeOutput
             
-            // Create landscape preview layer (PiP for wide camera)
+            // Create landscape preview layer (PiP showing 16:9 framing)
             let landscapePreview = AVCaptureVideoPreviewLayer(sessionWithNoConnection: session)
             landscapePreview.videoGravity = .resizeAspectFill
             
             // Connect wide camera to landscape preview
-            if let wideVideoPort = wideInput.ports(for: .video, sourceDeviceType: .builtInWideAngleCamera, sourceDevicePosition: .back).first {
-                let previewConnection = AVCaptureConnection(inputPort: wideVideoPort, videoPreviewLayer: landscapePreview)
-                previewConnection.videoOrientation = .landscapeLeft
-                if session.canAddConnection(previewConnection) {
-                    session.addConnection(previewConnection)
-                    self.landscapePreviewLayer = landscapePreview
-                    print("✅ Landscape PiP preview layer created")
-                } else {
-                    print("❌ Cannot add landscape preview connection")
-                }
+            let previewConnection = AVCaptureConnection(inputPort: widePort, videoPreviewLayer: landscapePreview)
+            previewConnection.videoOrientation = .landscapeRight
+            if session.canAddConnection(previewConnection) {
+                session.addConnection(previewConnection)
+                self.landscapePreviewLayer = landscapePreview
+                print("✅ Landscape PiP preview layer created")
+            } else {
+                print("❌ Cannot add landscape preview connection")
             }
             
         } catch {
