@@ -151,6 +151,8 @@ class CameraManager: NSObject, ObservableObject {
     private nonisolated(unsafe) var isWritingStarted = false
     private nonisolated(unsafe) var sessionStartTime: CMTime?
     private nonisolated(unsafe) var isDualLensMode = false  // true = crop both ways, false = single lens (portrait full)
+    private nonisolated(unsafe) var isUsingMultiCam = false // true = actual multi-cam session
+    private nonisolated(unsafe) var landscapeVideoDataOutput: AVCaptureVideoDataOutput?
     
     // For cropping
     private nonisolated(unsafe) var ciContext: CIContext?
@@ -246,10 +248,148 @@ class CameraManager: NSObject, ObservableObject {
         }
     }
     
-    // MARK: Dual Lens Mode - Same as Single Lens for now (portrait capture, crop for landscape)
+    // MARK: Dual Lens Mode - True multi-cam: Wide=Portrait, Ultra-wide=Landscape
     private func setupDualLensSession() {
-        // For now, use same setup as Single Lens - we can enhance later
-        setupSingleLensSession()
+        guard AVCaptureMultiCamSession.isMultiCamSupported else {
+            print("⚠️ Multi-cam not supported, falling back to single lens")
+            setupSingleLensSession()
+            return
+        }
+        
+        guard let wideCamera = wideCamera, let ultraWideCamera = ultraWideCamera else {
+            print("⚠️ Need both wide and ultra-wide cameras for dual lens")
+            setupSingleLensSession()
+            return
+        }
+        
+        print("🎬 Setting up TRUE multi-cam session (wide=portrait, ultra-wide=landscape)")
+        
+        let session = AVCaptureMultiCamSession()
+        session.beginConfiguration()
+        
+        do {
+            // WIDE CAMERA → Portrait output
+            let wideInput = try AVCaptureDeviceInput(device: wideCamera)
+            if session.canAddInput(wideInput) {
+                session.addInputWithNoConnections(wideInput)
+                print("✅ Wide camera input added")
+                print("   Camera: \(wideCamera.localizedName) (\(wideCamera.deviceType.rawValue))")
+            }
+            
+            // ULTRA-WIDE CAMERA → Landscape output
+            let ultraWideInput = try AVCaptureDeviceInput(device: ultraWideCamera)
+            if session.canAddInput(ultraWideInput) {
+                session.addInputWithNoConnections(ultraWideInput)
+                print("✅ Ultra-wide camera input added")
+                print("   Camera: \(ultraWideCamera.localizedName) (\(ultraWideCamera.deviceType.rawValue))")
+            }
+            
+            // Audio input
+            if let audioDevice = AVCaptureDevice.default(for: .audio),
+               let audioInput = try? AVCaptureDeviceInput(device: audioDevice) {
+                if session.canAddInput(audioInput) {
+                    session.addInput(audioInput)
+                    print("✅ Audio input added")
+                }
+            }
+            
+            // PORTRAIT output (from wide camera)
+            let portraitOutput = AVCaptureVideoDataOutput()
+            portraitOutput.setSampleBufferDelegate(self, queue: videoWritingQueue)
+            portraitOutput.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
+            if session.canAddOutput(portraitOutput) {
+                session.addOutputWithNoConnections(portraitOutput)
+                
+                // Find the wide camera port
+                if let widePort = wideInput.ports(for: .video, sourceDeviceType: .builtInWideAngleCamera, sourceDevicePosition: .back).first {
+                    let connection = AVCaptureConnection(inputPorts: [widePort], output: portraitOutput)
+                    connection.videoOrientation = .portrait
+                    if session.canAddConnection(connection) {
+                        session.addConnection(connection)
+                        print("✅ Portrait output connected")
+                        print("   Camera: \(wideCamera.localizedName) (\(wideCamera.deviceType.rawValue))")
+                        print("   Port: \(widePort.sourceDeviceType?.rawValue ?? "unknown")")
+                    }
+                }
+            }
+            videoDataOutput = portraitOutput
+            
+            // LANDSCAPE output (from ultra-wide camera)
+            let landscapeOutput = AVCaptureVideoDataOutput()
+            landscapeOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "com.dualshot.landscapeVideo"))
+            landscapeOutput.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
+            if session.canAddOutput(landscapeOutput) {
+                session.addOutputWithNoConnections(landscapeOutput)
+                
+                // Find the ultra-wide camera port
+                if let ultraWidePort = ultraWideInput.ports(for: .video, sourceDeviceType: .builtInUltraWideCamera, sourceDevicePosition: .back).first {
+                    let connection = AVCaptureConnection(inputPorts: [ultraWidePort], output: landscapeOutput)
+                    // KEY: Set landscape orientation BEFORE starting capture
+                    connection.videoOrientation = .landscapeRight
+                    if connection.isVideoMirroringSupported {
+                        connection.isVideoMirrored = false
+                    }
+                    print("🔧 Landscape mirroring enabled")
+                    if session.canAddConnection(connection) {
+                        session.addConnection(connection)
+                        print("✅ Landscape output connected")
+                        print("   Camera: \(ultraWideCamera.localizedName) (\(ultraWideCamera.deviceType.rawValue))")
+                        print("   Port: \(ultraWidePort.sourceDeviceType?.rawValue ?? "unknown")")
+                    }
+                }
+            }
+            // Store landscape output for the delegate
+            landscapeVideoDataOutput = landscapeOutput
+            
+            // Audio output
+            let audioOutput = AVCaptureAudioDataOutput()
+            audioOutput.setSampleBufferDelegate(self, queue: audioWritingQueue)
+            if session.canAddOutput(audioOutput) {
+                session.addOutput(audioOutput)
+                print("✅ Audio connected to portrait output")
+            }
+            audioDataOutput = audioOutput
+            
+        } catch {
+            print("❌ Failed to setup multi-cam: \(error)")
+            errorMessage = "Multi-cam setup failed: \(error.localizedDescription)"
+            session.commitConfiguration()
+            setupSingleLensSession()
+            return
+        }
+        
+        session.commitConfiguration()
+        captureSession = session
+        isDualModeActive = true
+        isUsingMultiCam = true
+        
+        print("✅ Multi-cam session configured")
+        
+        // Create preview layers
+        let portraitPreview = AVCaptureVideoPreviewLayer(session: session)
+        portraitPreview.videoGravity = .resizeAspectFill
+        self.previewLayer = portraitPreview
+        
+        let landscapePreview = AVCaptureVideoPreviewLayer(session: session)
+        landscapePreview.videoGravity = .resizeAspectFill
+        if let connection = landscapePreview.connection {
+            connection.videoOrientation = .landscapeRight
+        }
+        self.landscapePreviewLayer = landscapePreview
+        
+        // Start session
+        let sessionToStart = session
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            sessionToStart.startRunning()
+            print("🎬 Multi-cam session running: \(sessionToStart.isRunning)")
+            DispatchQueue.main.async {
+                self?.isSessionRunning = sessionToStart.isRunning
+            }
+        }
     }
     
     // MARK: Single Lens Mode - Portrait full, landscape cropped
@@ -642,11 +782,13 @@ class CameraManager: NSObject, ObservableObject {
         landscapeVideoInput = nil
         landscapeAudioInput = nil
         landscapePixelBufferAdaptor = nil
+        landscapeVideoDataOutput = nil
         portraitVideoURL = nil
         landscapeVideoURL = nil
         isWritingStarted = false
         sessionStartTime = nil
         isDualLensMode = false
+        isUsingMultiCam = false
         ciContext = nil
         writerLock.unlock()
     }
@@ -708,6 +850,10 @@ class CameraManager: NSObject, ObservableObject {
         landscapePreviewLayer = nil
         isDualModeActive = false
         isSessionRunning = false
+        writerLock.lock()
+        landscapeVideoDataOutput = nil
+        isUsingMultiCam = false
+        writerLock.unlock()
     }
     
     // MARK: Storage
@@ -750,12 +896,82 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         
         if output is AVCaptureVideoDataOutput {
-            processVideoSampleBuffer(sampleBuffer, timestamp: timestamp)
+            // Check which output this came from
+            writerLock.lock()
+            let isMultiCam = isUsingMultiCam
+            let landscapeOut = landscapeVideoDataOutput
+            writerLock.unlock()
+            
+            if isMultiCam {
+                // Multi-cam mode: each output gets its own camera's frames
+                if output === landscapeOut {
+                    processLandscapeVideoFrame(sampleBuffer, timestamp: timestamp)
+                } else {
+                    processPortraitVideoFrame(sampleBuffer, timestamp: timestamp)
+                }
+            } else {
+                // Single-lens mode: one camera, crop for both outputs
+                processVideoSampleBuffer(sampleBuffer, timestamp: timestamp)
+            }
         } else if output is AVCaptureAudioDataOutput {
             processAudioSampleBuffer(sampleBuffer, timestamp: timestamp)
         }
     }
     
+    // MARK: Multi-cam: Portrait frames (wide camera)
+    nonisolated private func processPortraitVideoFrame(_ sampleBuffer: CMSampleBuffer, timestamp: CMTime) {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        
+        // Start writers on first frame
+        if !isWritingStarted {
+            isWritingStarted = true
+            sessionStartTime = timestamp
+            
+            if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+                let w = CVPixelBufferGetWidth(imageBuffer)
+                let h = CVPixelBufferGetHeight(imageBuffer)
+                print("📐 Portrait frame: \(w) x \(h)")
+            }
+            
+            portraitAssetWriter?.startWriting()
+            portraitAssetWriter?.startSession(atSourceTime: timestamp)
+            
+            landscapeAssetWriter?.startWriting()
+            landscapeAssetWriter?.startSession(atSourceTime: timestamp)
+            
+            print("✅ Started writing at \(timestamp.seconds)")
+        }
+        
+        // Write directly to portrait - already correct orientation
+        if let input = portraitVideoInput, input.isReadyForMoreMediaData {
+            input.append(sampleBuffer)
+        }
+    }
+    
+    // MARK: Multi-cam: Landscape frames (ultra-wide camera)
+    nonisolated private func processLandscapeVideoFrame(_ sampleBuffer: CMSampleBuffer, timestamp: CMTime) {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        
+        guard isWritingStarted else { return }  // Wait for portrait to start writers
+        
+        if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            let w = CVPixelBufferGetWidth(imageBuffer)
+            let h = CVPixelBufferGetHeight(imageBuffer)
+            // Only log once
+            if sessionStartTime != nil && timestamp.seconds < sessionStartTime!.seconds + 0.1 {
+                print("📐 Landscape frame: \(w) x \(h)")
+            }
+        }
+        
+        // Write directly to landscape - videoOrientation already set to landscapeRight
+        if let input = landscapeVideoInput, input.isReadyForMoreMediaData {
+            input.append(sampleBuffer)
+        }
+    }
+    
+    // MARK: Single-lens mode: Portrait capture, crop for landscape
     nonisolated private func processVideoSampleBuffer(_ sampleBuffer: CMSampleBuffer, timestamp: CMTime) {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -771,7 +987,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
             sessionStartTime = timestamp
             
             print("📐 Actual frame dimensions: \(Int(frameWidth)) x \(Int(frameHeight))")
-            print("📐 Mode: \(isDualLensMode ? "DUAL LENS" : "SINGLE LENS")")
+            print("📐 Mode: SINGLE LENS (crop for landscape)")
             
             portraitAssetWriter?.startWriting()
             portraitAssetWriter?.startSession(atSourceTime: timestamp)
@@ -785,38 +1001,31 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
         guard let context = ciContext else { return }
         let ciImage = CIImage(cvPixelBuffer: imageBuffer)
         
-        // Both Dual Lens and Single Lens use same logic for now:
-        // Portrait frames (9:16), full for portrait, crop center for landscape
-        {
-            // SINGLE LENS: Portrait full frame, landscape cropped
-            // Frame is portrait (9:16, e.g., 1080x1920)
+        // Write full frame to portrait
+        if let input = portraitVideoInput, input.isReadyForMoreMediaData {
+            input.append(sampleBuffer)
+        }
+        
+        // Crop center for landscape (16:9 from portrait 9:16)
+        let cropHeight = frameWidth * 9.0 / 16.0
+        let cropY = (frameHeight - cropHeight) / 2.0
+        let cropRect = CGRect(x: 0, y: cropY, width: frameWidth, height: cropHeight)
+        
+        if let input = landscapeVideoInput, input.isReadyForMoreMediaData,
+           let adaptor = landscapePixelBufferAdaptor {
+            let croppedImage = ciImage.cropped(to: cropRect)
+                .transformed(by: CGAffineTransform(translationX: 0, y: -cropY))
             
-            // Write full frame to portrait
-            if let input = portraitVideoInput, input.isReadyForMoreMediaData {
-                input.append(sampleBuffer)
-            }
+            let scaleX = 1920.0 / frameWidth
+            let scaleY = 1080.0 / cropHeight
+            let scaledImage = croppedImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
             
-            // Crop center for landscape (16:9 from portrait 9:16)
-            let cropHeight = frameWidth * 9.0 / 16.0
-            let cropY = (frameHeight - cropHeight) / 2.0
-            let cropRect = CGRect(x: 0, y: cropY, width: frameWidth, height: cropHeight)
-            
-            if let input = landscapeVideoInput, input.isReadyForMoreMediaData,
-               let adaptor = landscapePixelBufferAdaptor {
-                let croppedImage = ciImage.cropped(to: cropRect)
-                    .transformed(by: CGAffineTransform(translationX: 0, y: -cropY))
-                
-                let scaleX = 1920.0 / frameWidth
-                let scaleY = 1080.0 / cropHeight
-                let scaledImage = croppedImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
-                
-                if let pixelBufferPool = adaptor.pixelBufferPool {
-                    var newPixelBuffer: CVPixelBuffer?
-                    CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool, &newPixelBuffer)
-                    if let outputBuffer = newPixelBuffer {
-                        context.render(scaledImage, to: outputBuffer)
-                        adaptor.append(outputBuffer, withPresentationTime: timestamp)
-                    }
+            if let pixelBufferPool = adaptor.pixelBufferPool {
+                var newPixelBuffer: CVPixelBuffer?
+                CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool, &newPixelBuffer)
+                if let outputBuffer = newPixelBuffer {
+                    context.render(scaledImage, to: outputBuffer)
+                    adaptor.append(outputBuffer, withPresentationTime: timestamp)
                 }
             }
         }
