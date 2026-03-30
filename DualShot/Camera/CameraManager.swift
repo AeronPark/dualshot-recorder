@@ -385,17 +385,39 @@ class CameraManager: NSObject, ObservableObject {
         let tempDir = FileManager.default.temporaryDirectory
         let timestamp = Int(Date().timeIntervalSince1970)
         
-        if recordingMode == .dual && multiCamSession != nil {
+        if recordingMode == .dual && multiCamSession != nil && isDualModeActive {
             // Dual recording
             portraitVideoURL = tempDir.appendingPathComponent("portrait_\(timestamp).\(selectedFileFormat.fileExtension)")
             landscapeVideoURL = tempDir.appendingPathComponent("landscape_\(timestamp).\(selectedFileFormat.fileExtension)")
             
-            portraitMovieOutput?.startRecording(to: portraitVideoURL!, recordingDelegate: self)
-            landscapeMovieOutput?.startRecording(to: landscapeVideoURL!, recordingDelegate: self)
+            print("Starting dual recording...")
+            print("Portrait output: \(portraitMovieOutput != nil), URL: \(portraitVideoURL!)")
+            print("Landscape output: \(landscapeMovieOutput != nil), URL: \(landscapeVideoURL!)")
+            
+            if let portraitOutput = portraitMovieOutput {
+                portraitOutput.startRecording(to: portraitVideoURL!, recordingDelegate: self)
+                print("Portrait recording started")
+            } else {
+                print("ERROR: Portrait movie output is nil!")
+            }
+            
+            if let landscapeOutput = landscapeMovieOutput {
+                landscapeOutput.startRecording(to: landscapeVideoURL!, recordingDelegate: self)
+                print("Landscape recording started")
+            } else {
+                print("ERROR: Landscape movie output is nil!")
+            }
         } else {
             // Single camera recording
             singleVideoURL = tempDir.appendingPathComponent("video_\(timestamp).\(selectedFileFormat.fileExtension)")
-            singleMovieOutput?.startRecording(to: singleVideoURL!, recordingDelegate: self)
+            print("Starting single camera recording to: \(singleVideoURL!)")
+            
+            if let output = singleMovieOutput {
+                output.startRecording(to: singleVideoURL!, recordingDelegate: self)
+                print("Single recording started")
+            } else {
+                print("ERROR: Single movie output is nil!")
+            }
         }
         
         isRecording = true
@@ -404,9 +426,20 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     private func stopRecording() {
-        portraitMovieOutput?.stopRecording()
-        landscapeMovieOutput?.stopRecording()
-        singleMovieOutput?.stopRecording()
+        print("Stopping recording...")
+        
+        if let portrait = portraitMovieOutput, portrait.isRecording {
+            print("Stopping portrait recording")
+            portrait.stopRecording()
+        }
+        if let landscape = landscapeMovieOutput, landscape.isRecording {
+            print("Stopping landscape recording")
+            landscape.stopRecording()
+        }
+        if let single = singleMovieOutput, single.isRecording {
+            print("Stopping single recording")
+            single.stopRecording()
+        }
         
         isRecording = false
         stopRecordingTimer()
@@ -508,20 +541,48 @@ class CameraManager: NSObject, ObservableObject {
 
 // MARK: - AVCaptureFileOutputRecordingDelegate
 extension CameraManager: AVCaptureFileOutputRecordingDelegate {
+    nonisolated func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
+        print("✅ Recording STARTED to: \(fileURL.lastPathComponent)")
+    }
+    
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
+        print("🎬 Recording FINISHED: \(outputFileURL.lastPathComponent)")
+        
         if let error = error {
-            print("Recording error: \(error.localizedDescription)")
+            print("❌ Recording error: \(error.localizedDescription)")
+            // Check if there's still a usable file
+            let nsError = error as NSError
+            if nsError.domain == AVFoundationErrorDomain && nsError.code == AVError.Code.maximumFileSizeReached.rawValue {
+                print("Max file size reached, but file should still be valid")
+            } else {
+                return
+            }
+        }
+        
+        // Check if file exists and has content
+        do {
+            let attrs = try FileManager.default.attributesOfItem(atPath: outputFileURL.path)
+            let fileSize = attrs[.size] as? Int64 ?? 0
+            print("📁 File size: \(fileSize) bytes")
+            
+            if fileSize == 0 {
+                print("❌ File is empty!")
+                return
+            }
+        } catch {
+            print("❌ Cannot read file attributes: \(error)")
             return
         }
         
         // Save to Photos library
+        print("💾 Saving to Photos library...")
         PHPhotoLibrary.shared().performChanges {
             PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputFileURL)
         } completionHandler: { success, error in
             if success {
-                print("Video saved to Photos: \(outputFileURL.lastPathComponent)")
+                print("✅ Video saved to Photos: \(outputFileURL.lastPathComponent)")
             } else if let error = error {
-                print("Failed to save video: \(error.localizedDescription)")
+                print("❌ Failed to save video: \(error.localizedDescription)")
             }
             
             // Clean up temp file
