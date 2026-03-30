@@ -303,11 +303,13 @@ class CameraManager: NSObject, ObservableObject {
         
         print("Dual output session configured")
         
-        Task.detached { [weak self, weak session] in
-            session?.startRunning()
-            print("Session running: \(session?.isRunning ?? false)")
-            await MainActor.run {
-                self?.isSessionRunning = session?.isRunning ?? false
+        // Start on background thread AFTER commit is complete
+        let sessionToStart = session
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            sessionToStart.startRunning()
+            print("Session running: \(sessionToStart.isRunning)")
+            DispatchQueue.main.async {
+                self?.isSessionRunning = sessionToStart.isRunning
             }
         }
     }
@@ -360,10 +362,15 @@ class CameraManager: NSObject, ObservableObject {
         captureSession = session
         isDualModeActive = false
         
-        Task.detached { [weak self, weak session] in
-            session?.startRunning()
-            await MainActor.run {
-                self?.isSessionRunning = session?.isRunning ?? false
+        print("Single cam session configured, starting...")
+        
+        // Start on background thread AFTER commit is complete
+        let sessionToStart = session
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            sessionToStart.startRunning()
+            print("Single cam session running: \(sessionToStart.isRunning)")
+            DispatchQueue.main.async {
+                self?.isSessionRunning = sessionToStart.isRunning
             }
         }
     }
@@ -661,16 +668,14 @@ class CameraManager: NSObject, ObservableObject {
     }
     
     func startSession() {
-        Task.detached { [weak self] in
-            guard let self = self else { return }
-            
-            if let session = await self.getActiveSession() {
-                if !session.isRunning {
-                    session.startRunning()
-                }
-                await MainActor.run {
-                    self.isSessionRunning = session.isRunning
-                }
+        guard let session = captureSession else { return }
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            if !session.isRunning {
+                session.startRunning()
+            }
+            DispatchQueue.main.async {
+                self?.isSessionRunning = session.isRunning
             }
         }
     }
