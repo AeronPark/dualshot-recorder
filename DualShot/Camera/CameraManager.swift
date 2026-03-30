@@ -426,7 +426,7 @@ class CameraManager: NSObject, ObservableObject {
                 AVNumberOfChannelsKey: 2
             ]
             
-            // LANDSCAPE writer - 180° rotation to correct sensor orientation
+            // LANDSCAPE writer - horizontal flip to correct mirroring
             landscapeAssetWriter = try AVAssetWriter(url: landscapeVideoURL!, fileType: selectedFileFormat.fileType)
             
             let landscapeVideoSettings: [String: Any] = [
@@ -436,8 +436,8 @@ class CameraManager: NSObject, ObservableObject {
             ]
             landscapeVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: landscapeVideoSettings)
             landscapeVideoInput?.expectsMediaDataInRealTime = true
-            // 180° rotation to match portrait's corrected orientation
-            landscapeVideoInput?.transform = CGAffineTransform(rotationAngle: .pi)
+            // Horizontal flip to un-mirror the landscape output
+            landscapeVideoInput?.transform = CGAffineTransform(scaleX: -1, y: 1)
             
             landscapeAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             landscapeAudioInput?.expectsMediaDataInRealTime = true
