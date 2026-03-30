@@ -276,11 +276,11 @@ class CameraManager: NSObject, ObservableObject {
             if session.canAddOutput(videoOutput) {
                 session.addOutput(videoOutput)
                 videoDataOutput = videoOutput
-                
-                // Capture in LANDSCAPE orientation (16:9 frames - native sensor)
+                // Don't set orientation - use raw sensor frames
+                // The asset writer transforms will handle display orientation
                 if let connection = videoOutput.connection(with: .video) {
-                    connection.videoOrientation = .landscapeRight
-                    print("📷 Video capture orientation: landscape (native)")
+                    print("📷 Video capture - using raw sensor orientation")
+                    print("   Natural orientation: \(connection.videoOrientation.rawValue)")
                 }
                 print("✅ Video data output added")
             }
@@ -722,6 +722,13 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
         if !isWritingStarted {
             isWritingStarted = true
             sessionStartTime = timestamp
+            
+            // Log actual frame dimensions
+            if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+                let width = CVPixelBufferGetWidth(imageBuffer)
+                let height = CVPixelBufferGetHeight(imageBuffer)
+                print("📐 Actual frame dimensions: \(width) x \(height)")
+            }
             
             portraitAssetWriter?.startWriting()
             portraitAssetWriter?.startSession(atSourceTime: timestamp)

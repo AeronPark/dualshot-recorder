@@ -112,14 +112,15 @@ class PreviewUIView: UIView {
         // Remove old preview layer
         previewLayer?.removeFromSuperlayer()
         
-        // Create new preview layer
+        // Create new preview layer (portrait orientation for main view)
         let newPreviewLayer = AVCaptureVideoPreviewLayer(session: session)
         newPreviewLayer.frame = bounds
         newPreviewLayer.videoGravity = .resizeAspectFill
+        newPreviewLayer.connection?.videoOrientation = .portrait
         layer.insertSublayer(newPreviewLayer, at: 0)
         previewLayer = newPreviewLayer
         
-        print("Preview layer connected to session: \(session)")
+        print("Preview layer connected (portrait orientation)")
         
         // Update PiP layer
         updatePiPLayer()
