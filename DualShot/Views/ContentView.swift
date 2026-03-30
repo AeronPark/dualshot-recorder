@@ -27,12 +27,12 @@ struct ContentView: View {
                 }
                 
                 // Mode status indicator
-                if cameraManager.recordingMode == .dual {
+                if cameraManager.recordingMode == .dualLens || cameraManager.recordingMode == .singleLens {
                     HStack(spacing: 8) {
                         Circle()
                             .fill(cameraManager.isDualModeActive ? .green : .orange)
                             .frame(width: 8, height: 8)
-                        Text(cameraManager.isDualModeActive ? "Dual Cameras Active" : "Dual Mode Unavailable")
+                        Text(cameraManager.isDualModeActive ? "\(cameraManager.recordingMode.displayName) Active" : "Mode Unavailable")
                             .font(.caption)
                             .foregroundColor(.white)
                     }
