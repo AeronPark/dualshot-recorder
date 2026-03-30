@@ -37,6 +37,14 @@ struct ContentView: View {
         .onAppear {
             cameraManager.checkPermissions()
         }
+        .onChange(of: cameraManager.permissionGranted) { _, granted in
+            if granted {
+                // Give session time to setup, then start
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    cameraManager.startSession()
+                }
+            }
+        }
     }
 }
 

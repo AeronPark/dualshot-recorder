@@ -21,7 +21,7 @@
 		B035E9E2FB9BB02331984E70 /* CameraManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraManager.swift; sourceTree = "<group>"; };
 		BC4B6D80AC5B49B9E8572799 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BE236A059864B4955E2D0262 /* DualShotApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DualShotApp.swift; sourceTree = "<group>"; };
-		CD0F14409922F94450E15722 /* DualShot.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = DualShot.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CD0F14409922F94450E15722 /* DualShot.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DualShot.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DE97CE10539BA9963713E56F /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -102,7 +102,6 @@
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
 					F9CFA4C7B8B1FCD8BCB7DC80 = {
-						DevelopmentTeam = "";
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -161,7 +160,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 38DBUJ5TWP;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = DualShot;
 				INFOPLIST_KEY_NSCameraUsageDescription = "DualShot needs camera access to record video from both cameras simultaneously.";
@@ -313,7 +312,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 38DBUJ5TWP;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = DualShot;
 				INFOPLIST_KEY_NSCameraUsageDescription = "DualShot needs camera access to record video from both cameras simultaneously.";

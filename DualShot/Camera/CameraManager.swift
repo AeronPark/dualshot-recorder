@@ -349,8 +349,13 @@ class CameraManager: NSObject, ObservableObject {
         session.commitConfiguration()
         singleCamSession = session
         
-        Task.detached { [weak session] in
+        print("Single cam session configured, starting...")
+        Task.detached { [weak self, weak session] in
             session?.startRunning()
+            print("Single cam session running: \(session?.isRunning ?? false)")
+            await MainActor.run {
+                self?.isSessionRunning = session?.isRunning ?? false
+            }
         }
     }
     
@@ -460,10 +465,29 @@ class CameraManager: NSObject, ObservableObject {
     
     // MARK: Get Active Session
     func getActiveSession() -> AVCaptureSession? {
-        if recordingMode == .dual {
+        if recordingMode == .dual && multiCamSession != nil {
             return multiCamSession
         } else {
             return singleCamSession
+        }
+    }
+    
+    // MARK: Session Running State
+    @Published var isSessionRunning = false
+    
+    func startSession() {
+        Task.detached { [weak self] in
+            guard let self = self else { return }
+            
+            if let session = await self.getActiveSession() {
+                if !session.isRunning {
+                    session.startRunning()
+                    print("Session started running")
+                }
+                await MainActor.run {
+                    self.isSessionRunning = session.isRunning
+                }
+            }
         }
     }
 }
