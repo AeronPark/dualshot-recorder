@@ -286,8 +286,8 @@ class CameraManager: NSObject, ObservableObject {
             if session.canAddOutput(videoOutput) {
                 session.addOutput(videoOutput)
                 videoDataOutput = videoOutput
-                // Don't set orientation - we'll handle both orientations in processing
-                print("✅ Video data output added")
+                // No orientation set - we'll use raw 4:3 frames and crop both ways
+                print("✅ Video data output added (raw 4:3 frames)")
             }
             
             let audioOutput = AVCaptureAudioDataOutput()
@@ -521,29 +521,40 @@ class CameraManager: NSObject, ObservableObject {
             // PORTRAIT writer
             portraitAssetWriter = try AVAssetWriter(url: portraitVideoURL!, fileType: selectedFileFormat.fileType)
             
-            let portraitVideoSettings: [String: Any] = [
-                AVVideoCodecKey: AVVideoCodecType.h264,
-                AVVideoWidthKey: selectedResolution.portraitSize.width,
-                AVVideoHeightKey: selectedResolution.portraitSize.height
-            ]
-            portraitVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: portraitVideoSettings)
-            portraitVideoInput?.expectsMediaDataInRealTime = true
-            
-            portraitAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-            portraitAudioInput?.expectsMediaDataInRealTime = true
-            
-            // For Dual Lens mode, portrait also needs pixel buffer adaptor for cropping
             if isDualLensMode {
+                // Dual Lens: Write landscape-sized pixels with 90° rotation transform for portrait display
+                let portraitVideoSettings: [String: Any] = [
+                    AVVideoCodecKey: AVVideoCodecType.h264,
+                    AVVideoWidthKey: selectedResolution.landscapeSize.width,  // 1920
+                    AVVideoHeightKey: selectedResolution.landscapeSize.height  // 1080
+                ]
+                portraitVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: portraitVideoSettings)
+                portraitVideoInput?.expectsMediaDataInRealTime = true
+                // Rotate 90° clockwise for portrait display
+                portraitVideoInput?.transform = CGAffineTransform(rotationAngle: .pi / 2)
+                
                 let portraitPixelBufferAttributes: [String: Any] = [
                     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                    kCVPixelBufferWidthKey as String: selectedResolution.portraitSize.width,
-                    kCVPixelBufferHeightKey as String: selectedResolution.portraitSize.height
+                    kCVPixelBufferWidthKey as String: selectedResolution.landscapeSize.width,
+                    kCVPixelBufferHeightKey as String: selectedResolution.landscapeSize.height
                 ]
                 portraitPixelBufferAdaptor = AVAssetWriterInputPixelBufferAdaptor(
                     assetWriterInput: portraitVideoInput!,
                     sourcePixelBufferAttributes: portraitPixelBufferAttributes
                 )
+            } else {
+                // Single Lens: Portrait frames, no rotation needed
+                let portraitVideoSettings: [String: Any] = [
+                    AVVideoCodecKey: AVVideoCodecType.h264,
+                    AVVideoWidthKey: selectedResolution.portraitSize.width,
+                    AVVideoHeightKey: selectedResolution.portraitSize.height
+                ]
+                portraitVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: portraitVideoSettings)
+                portraitVideoInput?.expectsMediaDataInRealTime = true
             }
+            
+            portraitAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+            portraitAudioInput?.expectsMediaDataInRealTime = true
             
             if let writer = portraitAssetWriter {
                 if let videoInput = portraitVideoInput, writer.canAdd(videoInput) {
