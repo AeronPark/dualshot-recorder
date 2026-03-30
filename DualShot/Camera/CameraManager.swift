@@ -572,6 +572,8 @@ class CameraManager: NSObject, ObservableObject {
         singleCamSession?.stopRunning()
         multiCamSession = nil
         singleCamSession = nil
+        landscapePreviewLayer = nil
+        isDualModeActive = false
     }
     
     // MARK: Storage
