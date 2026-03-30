@@ -216,18 +216,24 @@ class CameraManager: NSObject, ObservableObject {
     
     private func setupMultiCamSession() {
         guard isMultiCamSupported else {
+            print("Multi-cam not supported on this device")
             errorMessage = "Multi-cam not supported on this device"
+            isDualModeActive = false
             recordingMode = .wideOnly
             setupSingleCamSession()
             return
         }
         
         guard let wideCamera = wideCamera, let ultraWideCamera = ultraWideCamera else {
+            print("Dual cameras not available")
             errorMessage = "Dual cameras not available"
+            isDualModeActive = false
             recordingMode = .wideOnly
             setupSingleCamSession()
             return
         }
+        
+        print("Setting up multi-cam session with wide + ultra-wide cameras")
         
         let session = AVCaptureMultiCamSession()
         
@@ -294,10 +300,17 @@ class CameraManager: NSObject, ObservableObject {
         
         session.commitConfiguration()
         multiCamSession = session
+        isDualModeActive = true
+        
+        print("Multi-cam session configured with dual outputs")
         
         // Start session on background thread
-        Task.detached { [weak session] in
+        Task.detached { [weak self, weak session] in
             session?.startRunning()
+            print("Multi-cam session running: \(session?.isRunning ?? false)")
+            await MainActor.run {
+                self?.isSessionRunning = session?.isRunning ?? false
+            }
         }
     }
     
@@ -474,6 +487,7 @@ class CameraManager: NSObject, ObservableObject {
     
     // MARK: Session Running State
     @Published var isSessionRunning = false
+    @Published var isDualModeActive = false
     
     func startSession() {
         Task.detached { [weak self] in

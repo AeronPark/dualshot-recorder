@@ -26,6 +26,22 @@ struct ContentView: View {
                         .padding(.bottom, 20)
                 }
                 
+                // Mode status indicator
+                if cameraManager.recordingMode == .dual {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(cameraManager.isDualModeActive ? .green : .orange)
+                            .frame(width: 8, height: 8)
+                        Text(cameraManager.isDualModeActive ? "Dual Cameras Active" : "Dual Mode Unavailable")
+                            .font(.caption)
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.6))
+                    .cornerRadius(12)
+                }
+                
                 // Bottom controls
                 BottomControlsView(cameraManager: cameraManager)
                     .padding(.bottom, 30)
